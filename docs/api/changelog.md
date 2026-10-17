@@ -13,6 +13,9 @@ from `indexer/openapi.yaml`). Try endpoints live in the
 
 ### Added
 
+- `GET /api/wallet/compare?a=&b=` — side-by-side activity summary for two public
+  accounts over an optional `from`/`to` interval, with shared contracts and the
+  event fields used (`fields_used`) disclosed (#1046).
 - This changelog and a generated OpenAPI 3.1 JSON document for tooling.
 - `GET /api/contracts/{id}/stats` — event/caller counts and a daily activity
   series for a contract, cached for 5 minutes. Accepts an optional `range`

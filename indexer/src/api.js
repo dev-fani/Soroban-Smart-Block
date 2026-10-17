@@ -50,6 +50,7 @@ export function handleCursorError(e, res) {
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
 import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
+import { isPublicAccountAddress, parseInterval, compareAccountActivity } from "./walletActivity.js";
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
@@ -2619,6 +2620,39 @@ export function createApi({ logDestination, dbOverride } = {}) {
       });
     } catch (e) {
       res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // GET /api/wallet/compare?a=&b=&from=&to= — side-by-side activity summary
+  // for two public accounts over the same optional date interval (#1046).
+  // Registered before /api/wallet/:address so "compare" is not read as an
+  // address. Returns 400 for malformed or identical addresses or a bad
+  // interval; empty accounts yield zeroed summaries, not an error.
+  app.get("/api/wallet/compare", async (req, res) => {
+    const { a, b } = req.query;
+    if (!isPublicAccountAddress(a) || !isPublicAccountAddress(b)) {
+      return res.status(400).json({ error: "a and b must be valid public account addresses (G...)" });
+    }
+    if (a === b) {
+      return res.status(400).json({ error: "a and b must be different addresses" });
+    }
+    let interval;
+    try {
+      interval = parseInterval(req.query);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+    try {
+      const [left, right] = await Promise.all([
+        db.getWalletEvents(a, interval),
+        db.getWalletEvents(b, interval),
+      ]);
+      res.json({
+        interval,
+        ...compareAccountActivity({ address: a, events: left }, { address: b, events: right }),
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
     }
   });
 

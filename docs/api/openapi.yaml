@@ -990,6 +990,70 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/wallet/compare:
+    get:
+      summary: Compare activity between two public accounts
+      description: >-
+        Summarises each account's indexed events over an optional date interval
+        and lists the contracts both accounts touched. `fields_used` discloses
+        the event columns the figures were derived from. Empty accounts return
+        zeroed summaries.
+      parameters:
+        - name: a
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: b
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Side-by-side activity summary
+          content:
+            application/json:
+              example:
+                interval: { from: "2026-01-01", to: "2026-01-31" }
+                accounts:
+                  - address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    event_count: 2
+                    contract_count: 1
+                    contract_ids: ["CABC"]
+                    function_counts: { transfer: 2 }
+                    first_ledger: 10
+                    last_ledger: 20
+                  - address: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    event_count: 0
+                    contract_count: 0
+                    contract_ids: []
+                    function_counts: {}
+                    first_ledger: null
+                    last_ledger: null
+                shared_contract_ids: []
+                fields_used: [contract_id, function, ledger, created_at]
+        "400":
+          description: Malformed address, identical addresses, or invalid interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/wallet/{address}:
     get:
       summary: Get events involving a wallet address
