@@ -1,9 +1,10 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
+import { parseExplorerFilters, filterByLedgerRange } from "../utils/explorerFilters";
 import ExportButton from "../components/ExportButton";
 import SkeletonLoader from "../components/SkeletonLoader";
 import StatsBar from "../components/StatsBar";
@@ -116,7 +117,17 @@ export default function Home() {
       }),
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
   });
-  const events = eventsPages?.pages.flatMap((page) => page.data) ?? [];
+  // Ledger range from the URL (#1038). The events API has no ledger filter, so
+  // the range is applied to the events already loaded.
+  const { filters: shareFilters, errors: filterErrors } = useMemo(
+    () => parseExplorerFilters(searchParams),
+    [searchParams],
+  );
+  const events = filterByLedgerRange(
+    eventsPages?.pages.flatMap((page) => page.data) ?? [],
+    shareFilters.fromLedger,
+    shareFilters.toLedger,
+  );
 
   // invalidate the event list when a live event arrives on the first page
   const handleLiveEvent = useCallback(
@@ -250,6 +261,35 @@ export default function Home() {
             aria-label="Jump to date"
           />
         </label>
+
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--muted)" }}>
+          Ledgers:
+          <input
+            type="number"
+            min={1}
+            placeholder="from"
+            aria-label="From ledger"
+            defaultValue={searchParams.get("from_ledger") ?? ""}
+            onBlur={(event) => updateView({ from_ledger: event.target.value.trim() || undefined })}
+            style={{ width: 110 }}
+          />
+          –
+          <input
+            type="number"
+            min={1}
+            placeholder="to"
+            aria-label="To ledger"
+            defaultValue={searchParams.get("to_ledger") ?? ""}
+            onBlur={(event) => updateView({ to_ledger: event.target.value.trim() || undefined })}
+            style={{ width: 110 }}
+          />
+        </label>
+
+        {filterErrors.length > 0 && (
+          <p role="alert" style={{ color: "var(--danger, #ef4444)", fontSize: 12, width: "100%" }}>
+            {filterErrors.join(" · ")}
+          </p>
+        )}
 
         <ExportButton
           target="events"
