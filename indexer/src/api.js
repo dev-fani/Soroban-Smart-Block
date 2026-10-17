@@ -55,6 +55,7 @@ import { verifyAbi } from "./verify_abi.js";
 import { lintAbi } from "./abiLint.js";
 import { buildManifest, verifyManifest } from "./abiManifest.js";
 import { buildUpgradeLineage } from "./upgradeLineage.js";
+import { previewRegistration } from "./registrationPreview.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus, getProviderStats, multiNodeRpc } from "./rpcMultiNode.js";
 import { cacheHitTotal, cacheMissTotal, apiRequestDuration, httpRequestsInFlight } from "./metrics.js";
@@ -2404,6 +2405,13 @@ export function createApi({ logDestination, dbOverride } = {}) {
   app.post("/api/abi/manifest/verify", writeLimiter, (req, res) => {
     const { manifest, metadata = {} } = req.body ?? {};
     const result = verifyManifest(manifest, metadata);
+    res.status(result.valid ? 200 : 422).json(result);
+  });
+
+  // POST /api/abi/preview — decode sample XDR arguments under a proposed ABI before publishing (issue #1057)
+  app.post("/api/abi/preview", writeLimiter, (req, res) => {
+    const { functions, samples } = req.body ?? {};
+    const result = previewRegistration({ functions, samples });
     res.status(result.valid ? 200 : 422).json(result);
   });
 
