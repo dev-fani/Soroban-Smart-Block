@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
+import LedgerScrubber from "../components/LedgerScrubber";
 import ExportButton from "../components/ExportButton";
 import SkeletonLoader from "../components/SkeletonLoader";
 import StatsBar from "../components/StatsBar";
@@ -260,6 +261,8 @@ export default function Home() {
           }}
         />
       </div>
+
+      {!isLoading && <LedgerScrubber events={events} />}
 
       <div className="card">
         {isLoading ? (
