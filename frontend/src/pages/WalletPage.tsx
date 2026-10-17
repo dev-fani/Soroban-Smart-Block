@@ -10,6 +10,7 @@ import SmartWalletPanel from "../components/SmartWalletPanel";
 import ProtocolBadge from "../components/ProtocolBadge";
 import ActivityCalendar from "../components/ActivityCalendar";
 import { useWatchlist } from "./WatchlistPage";
+import { groupByInteraction } from "../utils/interactionGroups";
 import {
   isMuxedAddress,
   muxedId,
@@ -18,7 +19,36 @@ import {
   isValidStellarAddress,
 } from "../utils/strkey";
 
-type GroupBy = "contract" | "none";
+type GroupBy = "contract" | "interaction" | "none";
+
+/**
+ * One contract interaction: consecutive events on the same contract, shown as a
+ * single expandable item in event order (#1041).
+ */
+function InteractionList({ events }: { events: DecodedEvent[] }) {
+  const groups = useMemo(() => groupByInteraction(events), [events]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {groups.map((group) => (
+        <details
+          key={`${group.startIndex}-${group.contractId}`}
+          style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px" }}
+        >
+          <summary style={{ cursor: "pointer", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "baseline" }}>
+            <span style={{ fontFamily: "monospace", fontSize: 13 }}>{truncateAddress(group.contractId)}</span>
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>
+              {group.events.length} event{group.events.length !== 1 ? "s" : ""}
+            </span>
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>{group.functions.join(", ")}</span>
+          </summary>
+          <div style={{ marginTop: 8 }}>
+            <EventTable events={group.events} />
+          </div>
+        </details>
+      ))}
+    </div>
+  );
+}
 
 const EVENT_TYPE_CHIPS: { key: string; label: string }[] = [
   { key: "transfer", label: "Transfer" },
@@ -304,9 +334,9 @@ export default function WalletPage() {
   const fromDate = searchParams.get("from") ?? "";
   const toDate = searchParams.get("to") ?? "";
   const fnFilter = searchParams.get("fn") ?? "";
-  const groupBy = (
-    searchParams.get("group") === "contract" ? "contract" : "none"
-  ) as GroupBy;
+  const groupParam = searchParams.get("group");
+  const groupBy: GroupBy =
+    groupParam === "contract" || groupParam === "interaction" ? groupParam : "none";
 
   // ── Update document title (#525) ─────────────────────────────────────────
   if (address) {
@@ -558,13 +588,12 @@ export default function WalletPage() {
           <label style={{ color: "var(--muted)", fontSize: 13 }}>Group by:</label>
           <select
             value={groupBy}
-            onChange={(e) =>
-              updateParam("group", e.target.value === "contract" ? "contract" : "")
-            }
+            onChange={(e) => updateParam("group", e.target.value === "none" ? "" : e.target.value)}
             style={{ fontSize: 13 }}
           >
             <option value="none">Flat list</option>
             <option value="contract">Contract</option>
+            <option value="interaction">Interaction sequence</option>
           </select>
         </div>
 
@@ -640,6 +669,9 @@ export default function WalletPage() {
           </div>
         ) : filtered.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>No events match the current filters.</p>
+        ) : groupBy === "interaction" ? (
+          /* Consecutive calls to one contract, in event order (#1041) */
+          <InteractionList events={filtered} />
         ) : groupBy === "contract" && contractGroups ? (
           /* Grouped by contract (#526) */
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
