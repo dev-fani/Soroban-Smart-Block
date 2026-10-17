@@ -131,6 +131,8 @@ export interface DecodedEvent {
   contract_id: string;
   function: string;
   ledger: number;
+  /** Ledger close time (ISO 8601). Optional: used by the activity calendar (#1040). */
+  closed_at?: string | null;
   description: string;
   raw_topics: string[];
   raw_data?: string;

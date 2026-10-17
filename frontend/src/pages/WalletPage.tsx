@@ -8,6 +8,7 @@ import ExportButton from "../components/ExportButton";
 import WalletBalances from "../components/WalletBalances";
 import SmartWalletPanel from "../components/SmartWalletPanel";
 import ProtocolBadge from "../components/ProtocolBadge";
+import ActivityCalendar from "../components/ActivityCalendar";
 import { useWatchlist } from "./WatchlistPage";
 import {
   isMuxedAddress,
@@ -616,6 +617,9 @@ export default function WalletPage() {
 
       {/* Portfolio activity timeline (#916) */}
       <PortfolioTimeline address={address} events={allEvents} />
+
+      {/* Daily activity calendar (#1040) */}
+      {allEvents.length > 0 && <ActivityCalendar events={allEvents} />}
 
       {/* Events section */}
       <div className="card">
