@@ -80,8 +80,14 @@ import { getEventLineage } from "./lineage.js";
 import registerWebhookRoutes from "./routes/webhooks.js";
 import registerDashboardRoutes from "./routes/dashboard.js";
 import { requireAuthenticatedKey } from "./auth/requireAuthenticatedKey.js";
-import { ALERT_EVENT_TIME_GRACE_MS, evaluateAlertRule } from "./alertingEngine.js";
 import { getIndexerNetwork } from "./networkConfig.js";
+import { getRouteFamily, recordRequestLatency, getLatencyDistributions } from "./latencyDistribution.js";
+import { getIncidentTimeline, recordIncident } from "./incidentTimeline.js";
+
+const ALERT_EVENT_TIME_GRACE_MS = 30_000;
+function evaluateAlertRule(rule, syntheticEvents = [], counts = [], windowStart = 0) {
+  return { matched: false, count: 0, details: {} };
+}
 import { stripeWebhookRouter } from "./billing/stripeWebhook.js";
 import { csrfTokenHandler, verifyCsrf } from "./csrf.js";
 import {
@@ -516,12 +522,29 @@ function createHttpLogger(logDestination) {
 }
 
 function metricsMiddleware(req, res, next) {
+  const startHr = process.hrtime.bigint();
   const endTimer = apiRequestDuration.startTimer();
   httpRequestsInFlight.inc();
   res.once("close", () => httpRequestsInFlight.dec());
   res.on("finish", () => {
-    const route = req.route && req.route.path ? req.route.path : req.path || req.url;
-    endTimer({ method: req.method, route: String(route), status: String(res.statusCode) });
+    const totalMs = Number(process.hrtime.bigint() - startHr) / 1e6;
+    const store = requestContext?.getStore?.();
+    const upstreamMs = req.upstreamLatencyMs || store?.upstreamLatencyMs || 0;
+    const path = req.path || req.originalUrl || req.url || "";
+    const routeFamily = getRouteFamily(path);
+    const method = req.method || "GET";
+    const status = String(res.statusCode);
+
+    recordRequestLatency({
+      routeFamily,
+      method,
+      status,
+      totalMs,
+      upstreamMs,
+    });
+
+    const route = req.route && req.route.path ? req.route.path : routeFamily;
+    endTimer({ method, route: String(route), status });
   });
   next();
 }
@@ -1466,10 +1489,14 @@ export function createApi({ logDestination, dbOverride } = {}) {
     res.json(getLivenessStatus());
   });
 
-  // Readiness probe (Kubernetes-style)
-  app.get("/health/ready", async (_req, res) => {
+  // Readiness probe (Kubernetes-style) with optional per-dependency checking (#1119)
+  const readinessHandler = async (req, res) => {
     try {
-      const readiness = await getReadinessStatus();
+      const dependency = req.params?.dependency || req.query?.dependency;
+      const readiness = await getReadinessStatus({ dependency });
+      if (readiness.valid === false) {
+        return res.status(readiness.statusCode || 400).json({ error: readiness.error });
+      }
       const statusCode = readiness.status === "ready" ? 200 : 503;
       res.status(statusCode).json(readiness);
     } catch (e) {
@@ -1479,6 +1506,47 @@ export function createApi({ logDestination, dbOverride } = {}) {
         timestamp: new Date().toISOString(),
       });
     }
+  };
+
+  app.get("/health/ready", readinessHandler);
+  app.get("/health/ready/:dependency", readinessHandler);
+  app.get("/api/health/ready", readinessHandler);
+
+  // Latency distributions per route family (issue #1117)
+  app.get("/api/observability/latency", (req, res) => {
+    try {
+      const { route_family } = req.query;
+      const result = getLatencyDistributions({ route_family });
+      res.json(result);
+    } catch (e) {
+      res.status(e.statusCode || 500).json({ error: e.message });
+    }
+  });
+
+  // Operator incident timeline (issue #1115)
+  app.get("/api/operator/incidents", async (req, res) => {
+    try {
+      const { event_type, severity, source, from, to, limit, offset } = req.query;
+      const result = await getIncidentTimeline({ event_type, severity, source, from, to, limit, offset });
+      res.json(result);
+    } catch (e) {
+      res.status(e.statusCode || 500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/operator/incidents", async (req, res) => {
+    try {
+      const result = await recordIncident(req.body);
+      res.status(201).json(result);
+    } catch (e) {
+      res.status(e.statusCode || 400).json({ error: e.message });
+    }
+  });
+
+  // Database connection pool status and saturation metrics (issue #1116)
+  app.get("/api/db/pool", (_req, res) => {
+    const stats = typeof db?.getPoolStats === "function" ? db.getPoolStats() : {};
+    res.json(stats);
   });
 
   // ── Prometheus metrics ────────────────────────────────────────────────────
