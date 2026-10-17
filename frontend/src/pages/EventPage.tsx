@@ -12,6 +12,7 @@ import FactoryDeploymentTree from "../components/FactoryDeploymentTree";
 import { useTranslation } from "../i18n";
 import ProvenancePanel from "../components/ProvenancePanel";
 import DecodedProvenancePanel from "../components/DecodedProvenancePanel";
+import XdrDecodedSplitView from "../components/XdrDecodedSplitView";
 
 export default function EventPage() {
   const { t } = useTranslation();
@@ -196,6 +197,8 @@ export default function EventPage() {
       <ProvenancePanel seq={ev.seq} />
 
       <DecodedProvenancePanel event={ev} />
+
+      <XdrDecodedSplitView event={ev} />
 
       {/* CAP-0080 ZK host function cost delta */}
       {ev.zk_host_calls && <ZkCostDelta calls={ev.zk_host_calls.calls} delta={ev.zk_host_calls.delta} />}
