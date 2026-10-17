@@ -5,7 +5,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    token, Bytes, BytesN, Env, String, Symbol, Vec,
+    Bytes, BytesN, Env, String, Symbol, Vec,
 };
 
 mod state;
@@ -172,14 +172,6 @@ impl StoredMeta {
             StoredMeta::V1(meta) | StoredMeta::V2(meta) => meta,
         }
     }
-}
-
-#[allow(missing_docs)]
-#[contracttype]
-#[derive(Clone)]
-pub struct DepositRecord {
-    pub amount: i128,
-    pub token: Address,
 }
 
 /// Describes one callable function so the explorer can decode calls.
@@ -409,30 +401,6 @@ impl ExplorerContract {
         Self::bump_instance_ttl(&env);
     }
 
-    /// Configure the refundable registration deposit. Admin-only.
-    pub fn set_registration_deposit(env: Env, caller: Address, amount: i128, token: Address) {
-        caller.require_auth();
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        if caller != admin || amount < 0 {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-        env.storage().instance().set(&DataKey::RegistrationDepositAmount, &amount);
-        env.storage().instance().set(&DataKey::RegistrationDepositToken, &token);
-    }
-
-    /// Configure the treasury receiving forfeited registration deposits.
-    pub fn set_registration_treasury(env: Env, caller: Address, treasury: Address) {
-        caller.require_auth();
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        if caller != admin { panic_with_error!(&env, Error::Unauthorized); }
-        env.storage().instance().set(&DataKey::RegistrationTreasury, &treasury);
-    }
-
-    /// Return the deposit held for a registered contract.
-    pub fn deposit_of(env: Env, contract_id: BytesN<32>) -> i128 {
-        env.storage().persistent().get::<DataKey, DepositRecord>(&DataKey::ContractDeposit(contract_id)).map(|d| d.amount).unwrap_or(0)
-    }
-
     /// Return the current storage schema version.
     pub fn schema_version(env: Env) -> u32 { env.storage().instance().get(&DataKey::SchemaVersion).unwrap_or(1) }
 
@@ -605,14 +573,6 @@ impl ExplorerContract {
             PERSISTENT_TTL_THRESHOLD,
             PERSISTENT_TTL_EXTEND_TO,
         );
-        let deposit_amount: i128 = env.storage().instance().get(&DataKey::RegistrationDepositAmount).unwrap_or(0);
-        if deposit_amount > 0 {
-            let deposit_token: Address = env.storage().instance().get(&DataKey::RegistrationDepositToken).unwrap();
-            token::Client::new(&env, &deposit_token).transfer(&caller, &env.current_contract_address(), &deposit_amount);
-            let dkey = DataKey::ContractDeposit(contract_id.clone());
-            env.storage().persistent().set(&dkey, &DepositRecord { amount: deposit_amount, token: deposit_token });
-        }
-
         // Version history entry for abi_version 0.
         let vkey = DataKey::ContractVersion(VersionKey {
             contract_id: contract_id.clone(),
@@ -840,15 +800,6 @@ impl ExplorerContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if !state::can_modify_entry(caller == admin, caller == existing.registered_by) {
             panic_with_error!(&env, Error::Unauthorized);
-        }
-
-        if let Some(deposit) = env.storage().persistent().get::<DataKey, DepositRecord>(&DataKey::ContractDeposit(contract_id.clone())) {
-            if caller == existing.registered_by {
-                token::Client::new(&env, &deposit.token).transfer(&env.current_contract_address(), &caller, &deposit.amount);
-            } else if let Some(treasury) = env.storage().instance().get::<DataKey, Address>(&DataKey::RegistrationTreasury) {
-                token::Client::new(&env, &deposit.token).transfer(&env.current_contract_address(), &treasury, &deposit.amount);
-            }
-            env.storage().persistent().remove(&DataKey::ContractDeposit(contract_id.clone()));
         }
 
         env.storage().persistent().remove(&key);
@@ -1191,7 +1142,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events as _},
-        token, Env,
+        Env,
     };
 
     fn setup() -> (Env, ExplorerContractClient<'static>) {
@@ -2520,22 +2471,5 @@ mod tests {
             ..meta_v0
         };
         client.update_contract(&admin, &cid, &meta_v1);
-    }
-
-    #[test]
-    fn test_registration_deposit_refunds_owner_on_deregister() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.init(&admin, &0u32);
-        let sac = env.register_stellar_asset_contract_v2(admin.clone());
-        let token = sac.address();
-        token::StellarAssetClient::new(&env, &token).mint(&admin, &100);
-        client.set_registration_deposit(&admin, &25, &token);
-        let cid = BytesN::from_array(&env, &[71u8; 32]);
-        client.register_contract(&admin, &cid, &make_meta(&env, "Deposited", &admin));
-        assert_eq!(client.deposit_of(&cid), 25);
-        client.deregister_contract(&admin, &cid);
-        assert_eq!(client.deposit_of(&cid), 0);
-        assert_eq!(token::Client::new(&env, &token).balance(&admin), 100);
     }
 }
