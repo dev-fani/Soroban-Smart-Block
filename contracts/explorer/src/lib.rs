@@ -1151,9 +1151,6 @@ impl ExplorerContract {
         state::retained_count(seq, max)
     }
 
-    /// Return the rolling Merkle commitment and number of submitted events.
-    pub fn get_root(env: Env) -> (BytesN<32>, u64) { mmr::root(&env) }
-
     /// Fetch a page of decoded events starting from `cursor`.
     /// Returns at most `limit` events. Skips events evicted from the ring buffer.
     pub fn get_events(env: Env, cursor: u64, limit: u32) -> Vec<DecodedEvent> {
