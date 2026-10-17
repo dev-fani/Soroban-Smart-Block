@@ -54,6 +54,7 @@ import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, o
 import { verifyAbi } from "./verify_abi.js";
 import { lintAbi } from "./abiLint.js";
 import { buildManifest, verifyManifest } from "./abiManifest.js";
+import { buildUpgradeLineage } from "./upgradeLineage.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus, getProviderStats, multiNodeRpc } from "./rpcMultiNode.js";
 import { cacheHitTotal, cacheMissTotal, apiRequestDuration, httpRequestsInFlight } from "./metrics.js";
@@ -2404,6 +2405,26 @@ export function createApi({ logDestination, dbOverride } = {}) {
     const { manifest, metadata = {} } = req.body ?? {};
     const result = verifyManifest(manifest, metadata);
     res.status(result.valid ? 200 : 422).json(result);
+  });
+
+  // GET /api/contracts/:id/lineage — WASM versions and upgrade ledgers alongside
+  // metadata versions (issue #1056)
+  app.get("/api/contracts/:id/lineage", async (req, res) => {
+    try {
+      const [versions, upgrades] = await Promise.all([
+        db.query(
+          `SELECT abi_version, min_ledger, created_at
+           FROM contract_versions
+           WHERE contract_id = $1
+           ORDER BY abi_version ASC`,
+          [req.params.id],
+        ).then((r) => r.rows),
+        db.getUpgradeHistory(req.params.id),
+      ]);
+      res.json(buildUpgradeLineage(versions, upgrades));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // GET /api/spec/:id — fetch on-chain spec for a contract (functions only, legacy)
