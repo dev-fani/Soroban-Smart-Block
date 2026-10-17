@@ -394,30 +394,9 @@ impl ExplorerContract {
             panic_with_error!(&env, Error::InvalidInput);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::SchemaVersion, &1u32);
-        env.storage().instance().set(&DataKey::MigrationCursor, &0u32);
         env.storage().instance().set(&DataKey::EventSeq, &0u64);
         env.storage().instance().set(&DataKey::MaxEvents, &cap);
         Self::bump_instance_ttl(&env);
-    }
-
-    /// Return the current storage schema version.
-    pub fn schema_version(env: Env) -> u32 { env.storage().instance().get(&DataKey::SchemaVersion).unwrap_or(1) }
-
-    /// Resumable, bounded schema migration entrypoint.
-    pub fn migrate(env: Env, caller: Address, from: u32, to: u32, batch: u32) {
-        caller.require_auth();
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let current: u32 = env.storage().instance().get(&DataKey::SchemaVersion).unwrap_or(1);
-        if caller != admin || from != current || to < from || batch == 0 {
-            panic_with_error!(&env, Error::InvalidInput);
-        }
-        // Contract metadata is read through StoredMeta-compatible accessors in
-        // new deployments; this cursor makes the operation resumable and keeps
-        // each invocation bounded even when no entries need rewriting.
-        let cursor: u32 = env.storage().instance().get(&DataKey::MigrationCursor).unwrap_or(0);
-        env.storage().instance().set(&DataKey::MigrationCursor, &(cursor.saturating_add(batch)));
-        env.storage().instance().set(&DataKey::SchemaVersion, &to);
     }
 
     /// Transfer admin rights to a new address (current admin only).
