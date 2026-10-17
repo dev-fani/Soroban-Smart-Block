@@ -56,6 +56,8 @@ import {
   parseSummaryLimit,
   compareAccountActivity,
   summarizeCounterparties,
+  parseWorkspaceAddresses,
+  buildWorkspaceSummary,
 } from "./walletActivity.js";
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
@@ -2682,6 +2684,33 @@ export function createApi({ logDestination, dbOverride } = {}) {
     try {
       const events = await db.getWalletEvents(address, interval);
       res.json({ address, interval, ...summarizeCounterparties(events, address, { limit }) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/wallet/workspace  body: { addresses: [G..., ...], from?, to? } —
+  // summaries for 2-10 distinct public accounts in one response (#1048). The
+  // server keeps no record of the list: selection lives in the browser, and the
+  // response is marked no-store. Invalid or duplicate addresses return 400.
+  app.post("/api/wallet/workspace", async (req, res) => {
+    let addresses;
+    let interval;
+    try {
+      addresses = parseWorkspaceAddresses(req.body?.addresses);
+      interval = parseInterval(req.body ?? {});
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+    res.set("Cache-Control", "no-store");
+    try {
+      const entries = await Promise.all(
+        addresses.map(async (address) => ({
+          address,
+          events: await db.getWalletEvents(address, interval),
+        })),
+      );
+      res.json({ interval, ...buildWorkspaceSummary(entries) });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

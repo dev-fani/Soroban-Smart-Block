@@ -120,6 +120,43 @@ export function parseSummaryLimit(value) {
   return limit;
 }
 
+export const MIN_WORKSPACE_ACCOUNTS = 2;
+export const MAX_WORKSPACE_ACCOUNTS = 10;
+
+// Validates the account list for a review workspace (#1048). Addresses must be
+// distinct public accounts; the server keeps no record of the list.
+export function parseWorkspaceAddresses(value) {
+  if (!Array.isArray(value)) {
+    throw new RangeError("addresses must be an array of public account addresses");
+  }
+  if (value.length < MIN_WORKSPACE_ACCOUNTS || value.length > MAX_WORKSPACE_ACCOUNTS) {
+    throw new RangeError(
+      `addresses must contain between ${MIN_WORKSPACE_ACCOUNTS} and ${MAX_WORKSPACE_ACCOUNTS} accounts`,
+    );
+  }
+  const invalid = value.filter((address) => !isPublicAccountAddress(address));
+  if (invalid.length) {
+    throw new RangeError(`addresses contains invalid public account addresses: ${invalid.join(", ")}`);
+  }
+  if (new Set(value).size !== value.length) {
+    throw new RangeError("addresses must be distinct");
+  }
+  return value;
+}
+
+// Builds the per-account view for a review workspace from already-fetched
+// events. Each account gets an activity summary and its counterparty ranking.
+export function buildWorkspaceSummary(entries, { limit = DEFAULT_SUMMARY_LIMIT } = {}) {
+  return {
+    accounts: entries.map(({ address, events }) => ({
+      address,
+      activity: summarizeActivity(events),
+      ...summarizeCounterparties(events, address, { limit }),
+    })),
+    fields_used: FIELDS_USED,
+  };
+}
+
 export function compareAccountActivity(left, right) {
   const leftSummary = summarizeActivity(left.events);
   const rightSummary = summarizeActivity(right.events);

@@ -9,6 +9,8 @@ import {
   extractCounterparties,
   summarizeCounterparties,
   parseSummaryLimit,
+  parseWorkspaceAddresses,
+  buildWorkspaceSummary,
 } from "../src/walletActivity.js";
 
 const ACCOUNT_A = "G" + "A".repeat(55);
@@ -195,5 +197,51 @@ describe("parseSummaryLimit", () => {
     for (const bad of ["0", "51", "2.5", "abc"]) {
       assert.throws(() => parseSummaryLimit(bad), RangeError);
     }
+  });
+});
+
+const ACCOUNT_C = "G" + "C".repeat(55);
+
+describe("parseWorkspaceAddresses", () => {
+  it("returns a valid list of two to ten distinct public accounts", () => {
+    assert.deepEqual(parseWorkspaceAddresses([ACCOUNT_A, ACCOUNT_B]), [ACCOUNT_A, ACCOUNT_B]);
+  });
+
+  it("rejects a non-array body", () => {
+    assert.throws(() => parseWorkspaceAddresses(undefined), /must be an array/);
+    assert.throws(() => parseWorkspaceAddresses(ACCOUNT_A), /must be an array/);
+  });
+
+  it("rejects fewer than two or more than ten accounts", () => {
+    assert.throws(() => parseWorkspaceAddresses([ACCOUNT_A]), /between 2 and 10/);
+    const eleven = Array.from({ length: 11 }, (_, i) => "G" + String.fromCharCode(65 + i).repeat(55));
+    assert.throws(() => parseWorkspaceAddresses(eleven), /between 2 and 10/);
+  });
+
+  it("rejects malformed addresses and reports which ones", () => {
+    assert.throws(() => parseWorkspaceAddresses([ACCOUNT_A, "CNOTANACCOUNT"]), /CNOTANACCOUNT/);
+  });
+
+  it("rejects duplicate addresses", () => {
+    assert.throws(() => parseWorkspaceAddresses([ACCOUNT_A, ACCOUNT_A]), /distinct/);
+  });
+});
+
+describe("buildWorkspaceSummary", () => {
+  it("returns one entry per account with activity and counterparties", () => {
+    const result = buildWorkspaceSummary([
+      { address: ACCOUNT_A, events: [richEvent(1, "CA", null, COUNTERPARTY_X)] },
+      { address: ACCOUNT_C, events: [] },
+    ]);
+    assert.deepEqual(
+      result.accounts.map((account) => account.address),
+      [ACCOUNT_A, ACCOUNT_C],
+    );
+    assert.equal(result.accounts[0].activity.event_count, 1);
+    assert.equal(result.accounts[0].contracts[0].contract_id, "CA");
+    assert.equal(result.accounts[0].counterparties[0].address, COUNTERPARTY_X);
+    assert.equal(result.accounts[1].activity.event_count, 0);
+    assert.deepEqual(result.accounts[1].contracts, []);
+    assert.deepEqual(result.fields_used, FIELDS_USED);
   });
 });

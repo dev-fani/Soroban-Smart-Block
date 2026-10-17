@@ -1115,6 +1115,65 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/wallet/workspace:
+    post:
+      summary: Summarise a private multi-account review selection
+      description: >-
+        Returns activity and counterparty summaries for 2-10 distinct public
+        accounts in one response. The server stores nothing: the selection is
+        kept in the browser, and the response is sent with Cache-Control:
+        no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [addresses]
+              properties:
+                addresses:
+                  type: array
+                  minItems: 2
+                  maxItems: 10
+                  items:
+                    type: string
+                    pattern: "^G[A-Z2-7]{55}$"
+                from:
+                  type: string
+                  format: date
+                to:
+                  type: string
+                  format: date
+      responses:
+        "200":
+          description: One summary per requested account, in request order
+          content:
+            application/json:
+              example:
+                interval: { from: null, to: null }
+                accounts:
+                  - address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    activity:
+                      event_count: 1
+                      contract_count: 1
+                      contract_ids: ["CABC"]
+                      function_counts: { transfer: 1 }
+                      first_ledger: 10
+                      last_ledger: 10
+                    contracts:
+                      - contract_id: "CABC"
+                        count: 1
+                        tx_hashes: ["hashA"]
+                        event_seqs: [7]
+                    counterparties: []
+                fields_used: [contract_id, function, ledger, created_at]
+        "400":
+          description: Non-array body, 1 or more than 10 accounts, invalid or duplicate addresses, or invalid interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/wallet/{address}:
     get:
       summary: Get events involving a wallet address

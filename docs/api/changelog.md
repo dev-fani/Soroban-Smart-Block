@@ -19,6 +19,8 @@ from `indexer/openapi.yaml`). Try endpoints live in the
 - `GET /api/wallet/{address}/counterparties` — most-interacted contracts and
   counterparty addresses for a public account, each with `tx_hashes` and
   `event_seqs` for drill-down. Supports `from`/`to` and `limit` (1-50) (#1047).
+- `POST /api/wallet/workspace` — summaries for 2-10 distinct public accounts in
+  one response. The server stores no selection; responses are `no-store` (#1048).
 - This changelog and a generated OpenAPI 3.1 JSON document for tooling.
 - `GET /api/contracts/{id}/stats` — event/caller counts and a daily activity
   series for a contract, cached for 5 minutes. Accepts an optional `range`
