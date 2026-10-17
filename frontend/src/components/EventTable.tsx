@@ -1,9 +1,16 @@
-import { useMemo, useRef, memo } from "react";
+import { useMemo, useRef, useState, memo, Fragment } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
 import { useVirtualList } from "../hooks/useVirtualList";
+import EventColumnSettings from "./EventColumnSettings";
+import {
+  EVENT_COLUMN_LABELS,
+  loadEventColumns,
+  saveEventColumns,
+  type EventColumnId,
+} from "../utils/eventColumns";
 import FiatValue from "./FiatValue";
 import AssetLogo from "./AssetLogo";
 import CopyableAddress from "./CopyableAddress";
@@ -211,20 +218,9 @@ const ContractCell = memo(function ContractCell({ contractId, meta }: { contract
 });
 
 /** Render a single event row (extracted so it can be reused in both modes). */
-const EventRow = memo(function EventRow({ ev, contractMeta }: { ev: DecodedEvent; contractMeta?: ContractMeta }) {
+const DescriptionCell = memo(function DescriptionCell({ ev }: { ev: DecodedEvent }) {
   return (
-    <>
-      <td style={td}>
-        <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
-      </td>
-      <td style={td}>{ev.ledger.toLocaleString()}</td>
-      <td style={td}>
-        <ContractCell contractId={ev.contract_id} meta={contractMeta} />
-      </td>
-      <td style={td}>
-        <FunctionBadge fn={ev.function} />
-      </td>
-      <td
+    <td
         style={{
           ...td,
           maxWidth: 480,
@@ -297,7 +293,44 @@ const EventRow = memo(function EventRow({ ev, contractMeta }: { ev: DecodedEvent
               </span>
             ) : null;
           })()}
+    </td>
+  );
+});
+
+/** One event row. Cells render in the configured column order (#1039). */
+const EventRow = memo(function EventRow({
+  ev,
+  contractMeta,
+  columns,
+}: {
+  ev: DecodedEvent;
+  contractMeta?: ContractMeta;
+  columns: EventColumnId[];
+}) {
+  const cells: Record<EventColumnId, React.ReactNode> = {
+    seq: (
+      <td style={td}>
+        <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
       </td>
+    ),
+    ledger: <td style={td}>{ev.ledger.toLocaleString()}</td>,
+    contract: (
+      <td style={td}>
+        <ContractCell contractId={ev.contract_id} meta={contractMeta} />
+      </td>
+    ),
+    function: (
+      <td style={td}>
+        <FunctionBadge fn={ev.function} />
+      </td>
+    ),
+    description: <DescriptionCell ev={ev} />,
+  };
+  return (
+    <>
+      {columns.map((id) => (
+        <Fragment key={id}>{cells[id]}</Fragment>
+      ))}
     </>
   );
 });
@@ -306,6 +339,12 @@ export default function EventTable({ events, onReachEnd }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const { totalHeight, visibleItems } = useVirtualList(events, scrollContainerRef);
   const navigate = useNavigate();
+  // Visible columns and their order, persisted locally (#1039).
+  const [columns, setColumns] = useState<EventColumnId[]>(loadEventColumns);
+  const updateColumns = (next: EventColumnId[]) => {
+    setColumns(next);
+    saveEventColumns(next);
+  };
 
   // Batch-fetch contract metadata for the badge shown next to each contract
   // name (issue #556) — one request per unique contract on the page, cached
@@ -340,6 +379,7 @@ export default function EventTable({ events, onReachEnd }: Props) {
 
   return (
     <div style={{ overflowX: "auto" }}>
+      <EventColumnSettings columns={columns} onChange={updateColumns} />
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr
@@ -348,11 +388,11 @@ export default function EventTable({ events, onReachEnd }: Props) {
               color: "var(--muted)",
             }}
           >
-            <th style={th}>Seq</th>
-            <th style={th}>Ledger</th>
-            <th style={th}>Contract</th>
-            <th style={th}>Function</th>
-            <th style={th}>Description</th>
+            {columns.map((id) => (
+              <th key={id} style={th}>
+                {EVENT_COLUMN_LABELS[id]}
+              </th>
+            ))}
           </tr>
         </thead>
       </table>
@@ -393,7 +433,11 @@ export default function EventTable({ events, onReachEnd }: Props) {
               >
                 <tbody>
                   <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                    <EventRow ev={item} contractMeta={contractMetaById.get(item.contract_id)} />
+                    <EventRow
+                      ev={item}
+                      contractMeta={contractMetaById.get(item.contract_id)}
+                      columns={columns}
+                    />
                   </tr>
                 </tbody>
               </table>
