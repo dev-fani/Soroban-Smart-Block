@@ -211,8 +211,6 @@ function ProtocolUsageRow({ label, count, total }: { label: string; count: numbe
 }
 
 function PortfolioTimeline({ address, events }: { address: string; events: DecodedEvent[] }) {
-  if (!address || events.length === 0) return null;
-
   // Protocol usage breakdown: count events per contract
   const contractCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -233,6 +231,9 @@ function PortfolioTimeline({ address, events }: { address: string; events: Decod
     }
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
   }, [events]);
+
+  // Hooks above must run unconditionally, so the empty-state return comes after them (#978).
+  if (!address || events.length === 0) return null;
 
   const total = events.length;
   // Large addresses notice
@@ -324,7 +325,7 @@ export default function WalletPage() {
     queryFn: () => api.walletHistory(address, { from: fromDate, to: toDate }),
     enabled: !!address && isValidAddress,
   });
-  const allEvents = walletQuery.data?.events ?? [];
+  const allEvents = useMemo(() => walletQuery.data?.events ?? [], [walletQuery.data]);
   const horizonAccount = walletQuery.data?.horizon_account ?? null;
   const xlmBalance = horizonAccount?.balances?.find((b) => b.asset_type === "native");
 

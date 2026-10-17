@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
+import reactHooks from "eslint-plugin-react-hooks";
 import designTokensRule from "./eslint-rules/design-tokens.js";
 
 export default [
@@ -7,6 +8,9 @@ export default [
   ...tseslint.configs.recommended,
   {
     rules: {
+      // Hook call order and stale-closure dependency bugs (#978).
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "warn",
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
       "@typescript-eslint/no-explicit-any": "warn",
       "design-tokens/enforce": ["error", {
@@ -24,6 +28,7 @@ export default [
       }],
     },
     plugins: {
+      "react-hooks": reactHooks,
       "design-tokens": {
         rules: {
           enforce: designTokensRule,
