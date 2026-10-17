@@ -52,6 +52,74 @@ export function summarizeActivity(events) {
   };
 }
 
+// Counterparties are Stellar addresses (G... or C...) that appear in an event's
+// topics or data, excluding the account being summarised. This is a textual
+// scan, so it can also pick up an address that is only referenced, not used.
+const STRKEY_RE = /\b[GC][A-Z2-7]{55}\b/g;
+const MAX_DRILLDOWN_IDS = 10;
+const DEFAULT_SUMMARY_LIMIT = 10;
+
+export const MAX_SUMMARY_LIMIT = 50;
+
+export function extractCounterparties(event, account) {
+  const text = `${JSON.stringify(event.raw_topics ?? null)} ${event.raw_data ?? ""}`;
+  const found = new Set(text.match(STRKEY_RE) ?? []);
+  found.delete(account);
+  return [...found];
+}
+
+function bumpGroup(groups, key, event) {
+  let group = groups.get(key);
+  if (!group) {
+    group = { key, count: 0, tx_hashes: new Set(), event_seqs: [] };
+    groups.set(key, group);
+  }
+  group.count += 1;
+  if (event.tx_hash && group.tx_hashes.size < MAX_DRILLDOWN_IDS) group.tx_hashes.add(event.tx_hash);
+  if (group.event_seqs.length < MAX_DRILLDOWN_IDS) group.event_seqs.push(Number(event.seq));
+}
+
+function topGroups(groups, limit, keyName) {
+  return [...groups.values()]
+    .sort((x, y) => y.count - x.count || x.key.localeCompare(y.key))
+    .slice(0, limit)
+    .map((group) => ({
+      [keyName]: group.key,
+      count: group.count,
+      tx_hashes: [...group.tx_hashes],
+      event_seqs: group.event_seqs,
+    }));
+}
+
+// Most-interacted contracts and counterparties for one account. Each entry
+// carries tx_hashes and event_seqs (capped at 10) so clients can drill down
+// to the source transactions and events.
+export function summarizeCounterparties(events, account, { limit = DEFAULT_SUMMARY_LIMIT } = {}) {
+  const contracts = new Map();
+  const counterparties = new Map();
+
+  for (const event of events) {
+    bumpGroup(contracts, event.contract_id, event);
+    for (const address of extractCounterparties(event, account)) {
+      bumpGroup(counterparties, address, event);
+    }
+  }
+
+  return {
+    contracts: topGroups(contracts, limit, "contract_id"),
+    counterparties: topGroups(counterparties, limit, "address"),
+  };
+}
+
+export function parseSummaryLimit(value) {
+  if (value === undefined) return DEFAULT_SUMMARY_LIMIT;
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SUMMARY_LIMIT) {
+    throw new RangeError(`limit must be an integer between 1 and ${MAX_SUMMARY_LIMIT}`);
+  }
+  return limit;
+}
+
 export function compareAccountActivity(left, right) {
   const leftSummary = summarizeActivity(left.events);
   const rightSummary = summarizeActivity(right.events);

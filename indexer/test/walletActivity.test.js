@@ -6,6 +6,9 @@ import {
   parseInterval,
   summarizeActivity,
   compareAccountActivity,
+  extractCounterparties,
+  summarizeCounterparties,
+  parseSummaryLimit,
 } from "../src/walletActivity.js";
 
 const ACCOUNT_A = "G" + "A".repeat(55);
@@ -102,5 +105,95 @@ describe("compareAccountActivity", () => {
     );
     assert.deepEqual(result.shared_contract_ids, []);
     assert.equal(result.accounts[0].event_count, 0);
+  });
+});
+
+const COUNTERPARTY_X = "G" + "X".repeat(55);
+const COUNTERPARTY_Y = "C" + "Y".repeat(55);
+
+const richEvent = (seq, contract_id, raw_topics, raw_data, tx_hash = `tx${seq}`) => ({
+  seq,
+  contract_id,
+  function: "transfer",
+  ledger: seq,
+  tx_hash,
+  raw_topics,
+  raw_data,
+});
+
+describe("extractCounterparties", () => {
+  it("finds addresses in topics and data but not the account itself", () => {
+    const found = extractCounterparties(
+      richEvent(1, "CA", [{ address: COUNTERPARTY_X }], `payee ${COUNTERPARTY_Y} from ${ACCOUNT_A}`),
+      ACCOUNT_A,
+    );
+    assert.deepEqual(found.sort(), [COUNTERPARTY_X, COUNTERPARTY_Y].sort());
+  });
+
+  it("returns an empty list when the event carries no addresses", () => {
+    assert.deepEqual(extractCounterparties(richEvent(1, "CA", null, null), ACCOUNT_A), []);
+  });
+});
+
+describe("summarizeCounterparties", () => {
+  it("returns empty lists for an account with no events", () => {
+    assert.deepEqual(summarizeCounterparties([], ACCOUNT_A), { contracts: [], counterparties: [] });
+  });
+
+  it("ranks contracts and counterparties by count, then by id", () => {
+    const events = [
+      richEvent(1, "CB", null, COUNTERPARTY_X),
+      richEvent(2, "CA", null, COUNTERPARTY_X),
+      richEvent(3, "CA", null, COUNTERPARTY_Y),
+    ];
+    const summary = summarizeCounterparties(events, ACCOUNT_A);
+    assert.deepEqual(
+      summary.contracts.map((c) => [c.contract_id, c.count]),
+      [["CA", 2], ["CB", 1]],
+    );
+    assert.deepEqual(
+      summary.counterparties.map((c) => [c.address, c.count]),
+      [[COUNTERPARTY_X, 2], [COUNTERPARTY_Y, 1]],
+    );
+  });
+
+  it("gives each entry tx_hashes and event_seqs for drill-down", () => {
+    const summary = summarizeCounterparties(
+      [richEvent(7, "CA", null, COUNTERPARTY_X, "hashA"), richEvent(9, "CA", null, COUNTERPARTY_X, "hashB")],
+      ACCOUNT_A,
+    );
+    assert.deepEqual(summary.contracts[0].tx_hashes, ["hashA", "hashB"]);
+    assert.deepEqual(summary.contracts[0].event_seqs, [7, 9]);
+    assert.deepEqual(summary.counterparties[0].event_seqs, [7, 9]);
+  });
+
+  it("caps drill-down ids at 10 per entry while still counting every event", () => {
+    const events = Array.from({ length: 15 }, (_, i) => richEvent(i + 1, "CA", null, null, `h${i}`));
+    const [contract] = summarizeCounterparties(events, ACCOUNT_A).contracts;
+    assert.equal(contract.count, 15);
+    assert.equal(contract.tx_hashes.length, 10);
+    assert.equal(contract.event_seqs.length, 10);
+  });
+
+  it("honours the limit", () => {
+    const events = [richEvent(1, "CA", null, null), richEvent(2, "CB", null, null)];
+    assert.equal(summarizeCounterparties(events, ACCOUNT_A, { limit: 1 }).contracts.length, 1);
+  });
+});
+
+describe("parseSummaryLimit", () => {
+  it("defaults to 10 when absent", () => {
+    assert.equal(parseSummaryLimit(undefined), 10);
+  });
+
+  it("accepts integers from 1 to 50", () => {
+    assert.equal(parseSummaryLimit("1"), 1);
+    assert.equal(parseSummaryLimit("50"), 50);
+  });
+
+  it("rejects zero, overflow, fractions, and non-numeric values", () => {
+    for (const bad of ["0", "51", "2.5", "abc"]) {
+      assert.throws(() => parseSummaryLimit(bad), RangeError);
+    }
   });
 });

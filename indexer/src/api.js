@@ -50,7 +50,13 @@ export function handleCursorError(e, res) {
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
 import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
-import { isPublicAccountAddress, parseInterval, compareAccountActivity } from "./walletActivity.js";
+import {
+  isPublicAccountAddress,
+  parseInterval,
+  parseSummaryLimit,
+  compareAccountActivity,
+  summarizeCounterparties,
+} from "./walletActivity.js";
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
@@ -2651,6 +2657,31 @@ export function createApi({ logDestination, dbOverride } = {}) {
         interval,
         ...compareAccountActivity({ address: a, events: left }, { address: b, events: right }),
       });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/wallet/:address/counterparties?from=&to=&limit= — most-interacted
+  // contracts and counterparty addresses for a public account, each with
+  // tx_hashes and event_seqs for drill-down (#1047). limit is 1-50 (default
+  // 10). An account with no events returns empty lists, not an error.
+  app.get("/api/wallet/:address/counterparties", async (req, res) => {
+    const { address } = req.params;
+    if (!isPublicAccountAddress(address)) {
+      return res.status(400).json({ error: "address must be a valid public account address (G...)" });
+    }
+    let interval;
+    let limit;
+    try {
+      interval = parseInterval(req.query);
+      limit = parseSummaryLimit(req.query.limit);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+    try {
+      const events = await db.getWalletEvents(address, interval);
+      res.json({ address, interval, ...summarizeCounterparties(events, address, { limit }) });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

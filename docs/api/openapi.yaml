@@ -1054,6 +1054,67 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/wallet/{address}/counterparties:
+    get:
+      summary: Most-interacted contracts and counterparties for a wallet
+      description: >-
+        Ranks the contracts and counterparty addresses (G... or C...) that a
+        public account's events reference, by event count. Each entry includes
+        tx_hashes and event_seqs (capped at 10) to drill down to source
+        transactions and events. Counterparties come from a textual scan of
+        event topics and data, so they can include referenced-only addresses.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        "200":
+          description: Ranked contracts and counterparties
+          content:
+            application/json:
+              example:
+                address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                interval: { from: null, to: null }
+                contracts:
+                  - contract_id: "CABC"
+                    count: 2
+                    tx_hashes: ["hashA", "hashB"]
+                    event_seqs: [7, 9]
+                counterparties:
+                  - address: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    count: 1
+                    tx_hashes: ["hashA"]
+                    event_seqs: [7]
+        "400":
+          description: Malformed address, invalid interval, or invalid limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/wallet/{address}:
     get:
       summary: Get events involving a wallet address
