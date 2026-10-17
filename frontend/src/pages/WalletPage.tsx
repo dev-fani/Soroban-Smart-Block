@@ -9,6 +9,7 @@ import WalletBalances from "../components/WalletBalances";
 import SmartWalletPanel from "../components/SmartWalletPanel";
 import TokenFlowPanel from "../components/TokenFlowPanel";
 import AddressLabelEditor from "../components/AddressLabelEditor";
+import PortfolioSnapshots from "../components/PortfolioSnapshots";
 import ProtocolBadge from "../components/ProtocolBadge";
 import { useWatchlist } from "./WatchlistPage";
 import {
@@ -625,6 +626,11 @@ export default function WalletPage() {
 
       {/* Portfolio activity timeline (#916) */}
       <PortfolioTimeline address={address} events={allEvents} />
+
+      {/* Opt-in XLM value history (#1044) */}
+      <div className="card">
+        <PortfolioSnapshots address={address} />
+      </div>
 
       {/* Token flow: incoming / outgoing / self transfers (#1042) */}
       <div className="card">
