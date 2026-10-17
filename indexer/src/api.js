@@ -52,6 +52,7 @@ import { fetchTokenMetadata } from "./sep41Metadata.js";
 import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
+import { lintAbi } from "./abiLint.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus, getProviderStats, multiNodeRpc } from "./rpcMultiNode.js";
 import { cacheHitTotal, cacheMissTotal, apiRequestDuration, httpRequestsInFlight } from "./metrics.js";
@@ -2376,6 +2377,12 @@ export function createApi({ logDestination, dbOverride } = {}) {
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // POST /api/abi/lint — pure ABI metadata checks (issue #1054). No storage or RPC access.
+  app.post("/api/abi/lint", writeLimiter, (req, res) => {
+    const result = lintAbi(req.body?.functions);
+    res.status(result.valid ? 200 : 422).json(result);
   });
 
   // GET /api/spec/:id — fetch on-chain spec for a contract (functions only, legacy)
