@@ -7,6 +7,7 @@ import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
 import WalletBalances from "../components/WalletBalances";
 import SmartWalletPanel from "../components/SmartWalletPanel";
+import TokenFlowPanel from "../components/TokenFlowPanel";
 import ProtocolBadge from "../components/ProtocolBadge";
 import { useWatchlist } from "./WatchlistPage";
 import {
@@ -616,6 +617,11 @@ export default function WalletPage() {
 
       {/* Portfolio activity timeline (#916) */}
       <PortfolioTimeline address={address} events={allEvents} />
+
+      {/* Token flow: incoming / outgoing / self transfers (#1042) */}
+      <div className="card">
+        <TokenFlowPanel address={address} events={allEvents} />
+      </div>
 
       {/* Events section */}
       <div className="card">
