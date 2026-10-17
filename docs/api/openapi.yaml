@@ -1174,6 +1174,99 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/wallet/filter-presets/validate:
+    post:
+      summary: Validate an account activity filter preset
+      description: >-
+        Checks a preset's name, fn categories, and date interval, and returns
+        the normalised form. Stores nothing. Presets are saved in the browser.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 60 }
+                fn: { type: string, description: "Comma-separated categories, up to 10" }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+      responses:
+        "200":
+          description: Normalised preset
+          content:
+            application/json:
+              example:
+                preset: { name: "Monthly transfers", fn: "transfer", from: "2026-01-01", to: "2026-01-31" }
+        "422":
+          description: Every validation problem, in `errors`
+          content:
+            application/json:
+              example:
+                errors: ["name is required"]
+
+  /api/wallet/filter-presets/share:
+    post:
+      summary: Encode a filter preset as a share token
+      description: >-
+        Returns a self-contained, versioned, base64url token for a validated
+        preset. The token carries the preset itself; nothing is stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 60 }
+                fn: { type: string }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+      responses:
+        "200":
+          description: Share token
+          content:
+            application/json:
+              example:
+                token: "eyJ2IjoxLCJuYW1lIjoiVHJhbnNmZXJzIn0"
+        "422":
+          description: Invalid preset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/filter-presets/open:
+    post:
+      summary: Decode a filter preset share token
+      description: >-
+        Decodes a share token and re-validates the preset it contains, so a
+        hand-made token cannot skip the checks applied on save.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, maxLength: 2048 }
+      responses:
+        "200":
+          description: Decoded and validated preset
+          content:
+            application/json:
+              example:
+                preset: { name: "Transfers", fn: "transfer", from: null, to: null }
+        "422":
+          description: Malformed, unsupported, or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/wallet/{address}:
     get:
       summary: Get events involving a wallet address

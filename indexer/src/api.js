@@ -59,6 +59,7 @@ import {
   parseWorkspaceAddresses,
   buildWorkspaceSummary,
 } from "./walletActivity.js";
+import { validatePreset, encodeShareToken, decodeShareToken } from "./walletFilterPresets.js";
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
@@ -2714,6 +2715,29 @@ export function createApi({ logDestination, dbOverride } = {}) {
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // Account activity filter presets (#1049). Presets are saved, named, and
+  // edited in the browser; these routes only validate one, or turn one into a
+  // share token and back. The server stores nothing. Invalid presets return
+  // 422 with every problem listed in `errors`.
+  app.post("/api/wallet/filter-presets/validate", (req, res) => {
+    const result = validatePreset(req.body);
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.json({ preset: result.preset });
+  });
+
+  app.post("/api/wallet/filter-presets/share", (req, res) => {
+    const result = validatePreset(req.body);
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.set("Cache-Control", "no-store");
+    res.json({ token: encodeShareToken(result.preset) });
+  });
+
+  app.post("/api/wallet/filter-presets/open", (req, res) => {
+    const result = decodeShareToken(req.body?.token);
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.json({ preset: result.preset });
   });
 
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
