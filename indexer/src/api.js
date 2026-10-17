@@ -53,6 +53,7 @@ import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./h
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { lintAbi } from "./abiLint.js";
+import { buildManifest, verifyManifest } from "./abiManifest.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus, getProviderStats, multiNodeRpc } from "./rpcMultiNode.js";
 import { cacheHitTotal, cacheMissTotal, apiRequestDuration, httpRequestsInFlight } from "./metrics.js";
@@ -2382,6 +2383,26 @@ export function createApi({ logDestination, dbOverride } = {}) {
   // POST /api/abi/lint — pure ABI metadata checks (issue #1054). No storage or RPC access.
   app.post("/api/abi/lint", writeLimiter, (req, res) => {
     const result = lintAbi(req.body?.functions);
+    res.status(result.valid ? 200 : 422).json(result);
+  });
+
+  // POST /api/abi/manifest — build a verified import manifest for a lint-clean ABI (issue #1055)
+  app.post("/api/abi/manifest", writeLimiter, (req, res) => {
+    const { contract_id, network, provenance, name, description, functions } = req.body ?? {};
+    const result = buildManifest({
+      contractId: contract_id,
+      network,
+      provenance,
+      metadata: { name, description, functions },
+    });
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.json(result.manifest);
+  });
+
+  // POST /api/abi/manifest/verify — check metadata against a manifest's content hash (issue #1055)
+  app.post("/api/abi/manifest/verify", writeLimiter, (req, res) => {
+    const { manifest, metadata = {} } = req.body ?? {};
+    const result = verifyManifest(manifest, metadata);
     res.status(result.valid ? 200 : 422).json(result);
   });
 
