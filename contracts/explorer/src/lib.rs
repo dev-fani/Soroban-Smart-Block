@@ -1341,9 +1341,9 @@ mod tests {
     fn test_submit_events_crossing_max_events_reverts() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
-        client.init(&admin, &5u32);
+        client.init(&admin, &MIN_MAX_EVENTS);
         assert!(client
-            .try_submit_events(&admin, &batch_of(&env, 6))
+            .try_submit_events(&admin, &batch_of(&env, MAX_BATCH + 1))
             .is_err());
         assert_eq!(client.event_count(), 0);
     }
@@ -1745,24 +1745,25 @@ mod tests {
     fn test_ring_buffer_wraps_correctly() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
-        client.init(&admin, &5u32);
+        client.init(&admin, &MIN_MAX_EVENTS);
         let cid: BytesN<32> = BytesN::from_array(&env, &[10u8; 32]);
         let base = make_input(&env, &cid);
 
-        for _ in 0..5 {
+        env.budget().reset_unlimited();
+        for _ in 0..MIN_MAX_EVENTS {
             client.submit_event(&admin, &base);
         }
-        assert_eq!(client.event_count(), 5u64);
+        assert_eq!(client.event_count(), MIN_MAX_EVENTS as u64);
 
         for _ in 0..10 {
             client.submit_event(&admin, &base);
         }
-        assert_eq!(client.event_count(), 5u64);
+        assert_eq!(client.event_count(), MIN_MAX_EVENTS as u64);
 
         let evs = client.get_events(&0u64, &20u32);
-        assert_eq!(evs.len(), 5);
+        assert_eq!(evs.len(), 20);
         assert_eq!(evs.get(0).unwrap().seq, 10);
-        assert_eq!(evs.get(4).unwrap().seq, 14);
+        assert_eq!(evs.get(19).unwrap().seq, 29);
     }
 
     #[test]
@@ -1868,11 +1869,12 @@ mod tests {
     fn test_cap_hit_event_emitted_on_eviction() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
-        client.init(&admin, &5u32);
+        client.init(&admin, &MIN_MAX_EVENTS);
         let cid: BytesN<32> = BytesN::from_array(&env, &[23u8; 32]);
         let base = make_input(&env, &cid);
 
-        for _ in 0..5 {
+        env.budget().reset_unlimited();
+        for _ in 0..MIN_MAX_EVENTS {
             client.submit_event(&admin, &base);
         }
         let before = env.events().all().len();
