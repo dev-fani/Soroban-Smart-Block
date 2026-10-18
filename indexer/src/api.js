@@ -2491,6 +2491,137 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // ── Sandbox Checkpoints & Non-destructive Reset (#1098) ──────────────────────
+  app.post("/api/sandbox/:id/checkpoints", async (req, res) => {
+    try {
+      const { name, description, files } = req.body || {};
+      if (!name || typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ error: "Checkpoint name is required" });
+      }
+
+      const { rows } = await db.query("SELECT * FROM sandboxes WHERE sandbox_id = $1", [req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: "Sandbox not found" });
+
+      const currentFiles = files || (typeof rows[0].files === "string" ? JSON.parse(rows[0].files || "{}") : rows[0].files || {});
+      const metadata = typeof rows[0].metadata === "string" ? JSON.parse(rows[0].metadata || "{}") : (rows[0].metadata || {});
+      const checkpoints = Array.isArray(metadata.checkpoints) ? metadata.checkpoints : [];
+
+      const checkpoint = {
+        id: `chk_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+        name: name.trim(),
+        description: description ? String(description).trim() : "",
+        createdAt: new Date().toISOString(),
+        files: currentFiles,
+      };
+
+      const updatedMetadata = { ...metadata, checkpoints: [...checkpoints, checkpoint] };
+      await db.query("UPDATE sandboxes SET metadata = $1, updated_at = NOW() WHERE sandbox_id = $2", [
+        JSON.stringify(updatedMetadata),
+        req.params.id,
+      ]);
+
+      res.status(201).json({ ok: true, checkpoint });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/sandbox/:id/checkpoints", async (req, res) => {
+    try {
+      const { rows } = await db.query("SELECT * FROM sandboxes WHERE sandbox_id = $1", [req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: "Sandbox not found" });
+
+      const metadata = typeof rows[0].metadata === "string" ? JSON.parse(rows[0].metadata || "{}") : (rows[0].metadata || {});
+      res.json({
+        checkpoints: Array.isArray(metadata.checkpoints) ? metadata.checkpoints : [],
+        scenarios: Array.isArray(metadata.scenarios) ? metadata.scenarios : [],
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sandbox/:id/reset", async (req, res) => {
+    try {
+      const { checkpointId, confirm } = req.body || {};
+      if (!checkpointId) return res.status(400).json({ error: "Missing checkpointId" });
+      if (confirm !== true) return res.status(400).json({ error: "Confirmation is required to reset environment" });
+
+      const { rows } = await db.query("SELECT * FROM sandboxes WHERE sandbox_id = $1", [req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: "Sandbox not found" });
+
+      const metadata = typeof rows[0].metadata === "string" ? JSON.parse(rows[0].metadata || "{}") : (rows[0].metadata || {});
+      const checkpoints = Array.isArray(metadata.checkpoints) ? metadata.checkpoints : [];
+      const scenarios = Array.isArray(metadata.scenarios) ? metadata.scenarios : [];
+
+      const target = checkpoints.find((c) => c.id === checkpointId || c.name === checkpointId);
+      if (!target) return res.status(404).json({ error: "Checkpoint not found" });
+
+      // Non-destructive reset: update files from checkpoint, retaining all metadata (scenarios & checkpoints)
+      await db.query("UPDATE sandboxes SET files = $1, updated_at = NOW() WHERE sandbox_id = $2", [
+        JSON.stringify(target.files),
+        req.params.id,
+      ]);
+
+      res.json({
+        ok: true,
+        restoredCheckpoint: target.name,
+        retainedScenariosCount: scenarios.length,
+        retainedCheckpointsCount: checkpoints.length,
+        files: target.files,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/sandbox/:id/scenarios", async (req, res) => {
+    try {
+      const { name, contractId, fn, args, description } = req.body || {};
+      if (!name || typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ error: "Scenario name is required" });
+      }
+
+      const { rows } = await db.query("SELECT * FROM sandboxes WHERE sandbox_id = $1", [req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: "Sandbox not found" });
+
+      const metadata = typeof rows[0].metadata === "string" ? JSON.parse(rows[0].metadata || "{}") : (rows[0].metadata || {});
+      const scenarios = Array.isArray(metadata.scenarios) ? metadata.scenarios : [];
+
+      const scenario = {
+        id: `scen_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+        name: name.trim(),
+        contractId: contractId ? String(contractId).trim() : "",
+        fn: fn ? String(fn).trim() : "",
+        args: typeof args === "string" ? args : JSON.stringify(args ?? []),
+        description: description ? String(description).trim() : "",
+        createdAt: new Date().toISOString(),
+      };
+
+      const updatedMetadata = { ...metadata, scenarios: [...scenarios, scenario] };
+      await db.query("UPDATE sandboxes SET metadata = $1, updated_at = NOW() WHERE sandbox_id = $2", [
+        JSON.stringify(updatedMetadata),
+        req.params.id,
+      ]);
+
+      res.status(201).json({ ok: true, scenario });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/sandbox/:id/scenarios", async (req, res) => {
+    try {
+      const { rows } = await db.query("SELECT * FROM sandboxes WHERE sandbox_id = $1", [req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: "Sandbox not found" });
+
+      const metadata = typeof rows[0].metadata === "string" ? JSON.parse(rows[0].metadata || "{}") : (rows[0].metadata || {});
+      res.json({ scenarios: Array.isArray(metadata.scenarios) ? metadata.scenarios : [] });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── Collaborative sandbox sessions (#926) ───────────────────────────────────
   // Sync runs over WebSocket at /collab/:sessionId (collab/server.js); these
   // routes create sessions and let the owner rotate link tokens / kick.
@@ -2603,6 +2734,24 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
       const cost = sim.cost ?? {};
       const retVal = sim.result?.retval;
+
+      let ledgerIO = null;
+      if (sim.transactionData) {
+        try {
+          const resResources = sim.transactionData.build().resources();
+          const fp = resResources.footprint();
+          const readBytesVal = typeof resResources.diskReadBytes === "function" ? resResources.diskReadBytes() : (resResources.readBytes ? resResources.readBytes() : 0);
+          ledgerIO = {
+            readBytes: Number(readBytesVal),
+            writeBytes: Number(resResources.writeBytes()),
+            readEntries: fp.readOnly().length,
+            writeEntries: fp.readWrite().length,
+          };
+        } catch {
+          ledgerIO = null;
+        }
+      }
+
       res.json({
         success: true,
         returnValue: retVal ? retVal.toXDR("base64") : undefined,
@@ -2611,6 +2760,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
           memBytes: String(cost.memBytes ?? 0),
         },
         minResourceFee: sim.minResourceFee ?? null,
+        ledgerIO,
         latestLedger: sim.latestLedger ?? null,
         // Footprint (SorobanTransactionData XDR) so the in-browser host (#925)
         // can import exactly the entries an invocation touches.

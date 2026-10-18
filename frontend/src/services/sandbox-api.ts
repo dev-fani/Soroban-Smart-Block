@@ -130,6 +130,55 @@ export async function deleteSandbox(sandboxId: string): Promise<void> {
 const NETWORK_PASSPHRASE = import.meta.env.VITE_STELLAR_NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
 const LOCAL_STATE_KEY = "soroban_sandbox_local_state";
 
+export interface LedgerIO {
+  readBytes: number;
+  writeBytes: number;
+  readEntries: number;
+  writeEntries: number;
+}
+
+export interface ResourceBudget {
+  cpuInsns: number;
+  memBytes: number;
+  ledgerIO?: LedgerIO | null;
+  minResourceFee?: string | null;
+  ledgerIOUnavailable?: boolean;
+  feeUnavailable?: boolean;
+}
+
+export interface BudgetDelta {
+  diff: number | null;
+  percent: number | null;
+  status: "increased" | "decreased" | "unchanged" | "baseline" | "unavailable";
+}
+
+export interface SimulationBudgetDeltas {
+  cpu: BudgetDelta;
+  mem: BudgetDelta;
+  ledgerReadBytes: BudgetDelta;
+  ledgerWriteBytes: BudgetDelta;
+  ledgerEntries: BudgetDelta;
+  fee: BudgetDelta;
+}
+
+export interface SandboxCheckpoint {
+  id: string;
+  name: string;
+  createdAt: string;
+  files: Record<string, SandboxFile>;
+  description?: string;
+}
+
+export interface SandboxScenario {
+  id: string;
+  name: string;
+  contractId: string;
+  fn: string;
+  args: string;
+  description?: string;
+  createdAt: string;
+}
+
 export interface SimulationResult {
   mode: "remote" | "local";
   returnValue?: string;
@@ -137,8 +186,47 @@ export interface SimulationResult {
   events: string[];
   cpuInsns: number;
   memBytes: number;
+  ledgerIO?: LedgerIO | null;
+  minResourceFee?: string | null;
+  ledgerIOUnavailable?: boolean;
+  feeUnavailable?: boolean;
+  budgetDeltas?: SimulationBudgetDeltas;
   stateDiff: { key: string; before: string | null; after: string | null }[];
   warnings: string[];
+}
+
+export function calculateBudgetDeltas(
+  current: ResourceBudget,
+  previous: ResourceBudget | null,
+): SimulationBudgetDeltas {
+  function getDelta(currVal: number | null | undefined, prevVal: number | null | undefined, isUnavailable: boolean): BudgetDelta {
+    if (isUnavailable || currVal === null || currVal === undefined) {
+      return { diff: null, percent: null, status: "unavailable" };
+    }
+    if (!previous || prevVal === null || prevVal === undefined) {
+      return { diff: 0, percent: 0, status: "baseline" };
+    }
+    const diff = currVal - prevVal;
+    const percent = prevVal > 0 ? (diff / prevVal) * 100 : (diff === 0 ? 0 : 100);
+    const status = diff > 0 ? "increased" : diff < 0 ? "decreased" : "unchanged";
+    return { diff, percent, status };
+  }
+
+  const feeCurr = current.minResourceFee != null ? Number(current.minResourceFee) : null;
+  const feePrev = previous?.minResourceFee != null ? Number(previous.minResourceFee) : null;
+
+  return {
+    cpu: getDelta(current.cpuInsns, previous?.cpuInsns, false),
+    mem: getDelta(current.memBytes, previous?.memBytes, false),
+    ledgerReadBytes: getDelta(current.ledgerIO?.readBytes, previous?.ledgerIO?.readBytes, !!current.ledgerIOUnavailable),
+    ledgerWriteBytes: getDelta(current.ledgerIO?.writeBytes, previous?.ledgerIO?.writeBytes, !!current.ledgerIOUnavailable),
+    ledgerEntries: getDelta(
+      current.ledgerIO ? current.ledgerIO.readEntries + current.ledgerIO.writeEntries : null,
+      previous?.ledgerIO ? previous.ledgerIO.readEntries + previous.ledgerIO.writeEntries : null,
+      !!current.ledgerIOUnavailable
+    ),
+    fee: getDelta(feeCurr, feePrev, !!current.feeUnavailable),
+  };
 }
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -189,15 +277,41 @@ async function simulateViaRpc(contractId: string, fn: string, args: xdr.ScVal[])
   return res.json();
 }
 
-export async function simulateRemote(contractId: string, fn: string, args: xdr.ScVal[]): Promise<SimulationResult> {
+export async function simulateRemote(
+  contractId: string,
+  fn: string,
+  args: xdr.ScVal[],
+  previousBudget: ResourceBudget | null = null,
+): Promise<SimulationResult> {
   const sim = await simulateViaRpc(contractId, fn, args);
+  const ledgerIO: LedgerIO | null = sim.ledgerIO ?? null;
+  const minResourceFee: string | null = sim.minResourceFee ?? null;
+  const ledgerIOUnavailable = !ledgerIO;
+  const feeUnavailable = minResourceFee == null;
+
+  const budget: ResourceBudget = {
+    cpuInsns: Number(sim.cost?.cpuInsns ?? 0),
+    memBytes: Number(sim.cost?.memBytes ?? 0),
+    ledgerIO,
+    minResourceFee,
+    ledgerIOUnavailable,
+    feeUnavailable,
+  };
+
+  const budgetDeltas = calculateBudgetDeltas(budget, previousBudget);
+
   return {
     mode: "remote",
     returnValue: sim.returnValue,
     error: sim.success ? undefined : sim.error,
     events: sim.events ?? [],
-    cpuInsns: Number(sim.cost?.cpuInsns ?? 0),
-    memBytes: Number(sim.cost?.memBytes ?? 0),
+    cpuInsns: budget.cpuInsns,
+    memBytes: budget.memBytes,
+    ledgerIO,
+    minResourceFee,
+    ledgerIOUnavailable,
+    feeUnavailable,
+    budgetDeltas,
     stateDiff: [],
     warnings: [],
   };
@@ -273,7 +387,12 @@ export class LocalSandboxHost {
     return data.entries.length;
   }
 
-  async simulate(contractId: string, fn: string, args: xdr.ScVal[]): Promise<SimulationResult> {
+  async simulate(
+    contractId: string,
+    fn: string,
+    args: xdr.ScVal[],
+    previousBudget: ResourceBudget | null = null,
+  ): Promise<SimulationResult> {
     const out = await this.call<{
       result: string | null;
       error: string | null;
@@ -287,6 +406,18 @@ export class LocalSandboxHost {
         `Bundled host is protocol ${this.protocolVersion} but imported state is from protocol ${this.networkProtocol}; results may differ from the network.`,
       );
     }
+
+    const budget: ResourceBudget = {
+      cpuInsns: out.budget.cpuInsns,
+      memBytes: out.budget.memBytes,
+      ledgerIO: null,
+      minResourceFee: null,
+      ledgerIOUnavailable: true,
+      feeUnavailable: true,
+    };
+
+    const budgetDeltas = calculateBudgetDeltas(budget, previousBudget);
+
     return {
       mode: "local",
       returnValue: out.result ?? undefined,
@@ -294,6 +425,11 @@ export class LocalSandboxHost {
       events: out.events,
       cpuInsns: out.budget.cpuInsns,
       memBytes: out.budget.memBytes,
+      ledgerIO: null,
+      minResourceFee: null,
+      ledgerIOUnavailable: true,
+      feeUnavailable: true,
+      budgetDeltas,
       stateDiff: out.stateDiff,
       warnings,
     };
@@ -319,4 +455,141 @@ function mergeLocalState(update: LocalState): LocalState {
     // quota exceeded — state still lives in the worker for this session
   }
   return merged;
+}
+
+// ── Sandbox Checkpoints & Scenarios (#1098) ──────────────────────────────────
+
+export async function createCheckpoint(
+  sandboxId: string,
+  name: string,
+  description?: string,
+  files?: Map<string, SandboxFile>,
+): Promise<SandboxCheckpoint> {
+  const filesObj: Record<string, SandboxFile> = {};
+  if (files) {
+    for (const [key, file] of files) filesObj[key] = file;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/sandbox/${sandboxId}/checkpoints`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, description, files: files ? filesObj : undefined }),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return data.checkpoint;
+    }
+  } catch {
+    // offline fallback
+  }
+
+  const checkpoint: SandboxCheckpoint = {
+    id: `chk_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+    name: name.trim(),
+    description: description?.trim() || "",
+    createdAt: new Date().toISOString(),
+    files: filesObj,
+  };
+  const key = `checkpoints_${sandboxId}`;
+  const existing: SandboxCheckpoint[] = JSON.parse(localStorage.getItem(key) || "[]");
+  existing.push(checkpoint);
+  localStorage.setItem(key, JSON.stringify(existing));
+  return checkpoint;
+}
+
+export async function listCheckpoints(
+  sandboxId: string,
+): Promise<{ checkpoints: SandboxCheckpoint[]; scenarios: SandboxScenario[] }> {
+  try {
+    const response = await fetch(`${API_BASE}/api/sandbox/${sandboxId}/checkpoints`);
+    if (response.ok) {
+      return response.json();
+    }
+  } catch {
+    // offline fallback
+  }
+
+  const checkpointsKey = `checkpoints_${sandboxId}`;
+  const scenariosKey = `scenarios_${sandboxId}`;
+  return {
+    checkpoints: JSON.parse(localStorage.getItem(checkpointsKey) || "[]"),
+    scenarios: JSON.parse(localStorage.getItem(scenariosKey) || "[]"),
+  };
+}
+
+export async function resetToCheckpoint(
+  sandboxId: string,
+  checkpointId: string,
+): Promise<{ restoredFiles: Record<string, SandboxFile>; retainedScenariosCount: number }> {
+  try {
+    const response = await fetch(`${API_BASE}/api/sandbox/${sandboxId}/reset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ checkpointId, confirm: true }),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return { restoredFiles: data.files, retainedScenariosCount: data.retainedScenariosCount };
+    }
+  } catch {
+    // offline fallback
+  }
+
+  const checkpointsKey = `checkpoints_${sandboxId}`;
+  const scenariosKey = `scenarios_${sandboxId}`;
+  const checkpoints: SandboxCheckpoint[] = JSON.parse(localStorage.getItem(checkpointsKey) || "[]");
+  const scenarios: SandboxScenario[] = JSON.parse(localStorage.getItem(scenariosKey) || "[]");
+  const target = checkpoints.find((c) => c.id === checkpointId || c.name === checkpointId);
+  if (!target) throw new Error("Checkpoint not found");
+
+  return {
+    restoredFiles: target.files,
+    retainedScenariosCount: scenarios.length,
+  };
+}
+
+export async function saveScenario(
+  sandboxId: string,
+  scenario: Omit<SandboxScenario, "id" | "createdAt">,
+): Promise<SandboxScenario> {
+  try {
+    const response = await fetch(`${API_BASE}/api/sandbox/${sandboxId}/scenarios`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(scenario),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return data.scenario;
+    }
+  } catch {
+    // offline fallback
+  }
+
+  const item: SandboxScenario = {
+    ...scenario,
+    id: `scen_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+    createdAt: new Date().toISOString(),
+  };
+  const key = `scenarios_${sandboxId}`;
+  const existing: SandboxScenario[] = JSON.parse(localStorage.getItem(key) || "[]");
+  existing.push(item);
+  localStorage.setItem(key, JSON.stringify(existing));
+  return item;
+}
+
+export async function listScenarios(sandboxId: string): Promise<SandboxScenario[]> {
+  try {
+    const response = await fetch(`${API_BASE}/api/sandbox/${sandboxId}/scenarios`);
+    if (response.ok) {
+      const data = await response.json();
+      return data.scenarios ?? [];
+    }
+  } catch {
+    // offline fallback
+  }
+
+  const key = `scenarios_${sandboxId}`;
+  return JSON.parse(localStorage.getItem(key) || "[]");
 }

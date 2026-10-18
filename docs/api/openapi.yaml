@@ -2578,6 +2578,221 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/sandbox/{id}/checkpoints:
+    get:
+      summary: List sandbox checkpoints and scenarios
+      description: Returns saved checkpoints and scenarios for the sandbox.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sandbox-abc123"
+      responses:
+        "200":
+          description: Checkpoints and scenarios list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checkpoints:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SandboxCheckpoint"
+                  scenarios:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SandboxScenario"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Create a named checkpoint for sandbox
+      description: Captures current sandbox state as a named checkpoint.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sandbox-abc123"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: "checkpoint-initial"
+                description:
+                  type: string
+                  example: "Initial setup after deployment"
+      responses:
+        "201":
+          description: Checkpoint created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  checkpoint:
+                    $ref: "#/components/schemas/SandboxCheckpoint"
+        "400":
+          description: Missing or empty checkpoint name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/sandbox/{id}/reset:
+    post:
+      summary: Reset sandbox environment to named checkpoint (non-destructive)
+      description: Restores files to the selected checkpoint with confirmation, retaining all saved scenarios and checkpoints.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sandbox-abc123"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [checkpointId, confirm]
+              properties:
+                checkpointId:
+                  type: string
+                  example: "chk_12345"
+                confirm:
+                  type: boolean
+                  example: true
+      responses:
+        "200":
+          description: Reset completed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  restoredCheckpoint:
+                    type: string
+                    example: "checkpoint-initial"
+                  retainedScenariosCount:
+                    type: integer
+                    example: 2
+                  retainedCheckpointsCount:
+                    type: integer
+                    example: 3
+        "400":
+          description: Missing checkpointId or confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Sandbox or checkpoint not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/sandbox/{id}/scenarios:
+    get:
+      summary: List saved scenarios for sandbox
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sandbox-abc123"
+      responses:
+        "200":
+          description: List of scenarios
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scenarios:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SandboxScenario"
+    post:
+      summary: Save a named scenario for sandbox
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sandbox-abc123"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: "Token transfer scenario"
+                contractId:
+                  type: string
+                  example: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                fn:
+                  type: string
+                  example: "transfer"
+                args:
+                  type: string
+                  example: '["GABC...", 100]'
+                description:
+                  type: string
+                  example: "Standard transfer test"
+      responses:
+        "201":
+          description: Scenario saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  scenario:
+                    $ref: "#/components/schemas/SandboxScenario"
+
   /api/sandboxes:
     get:
       summary: List sandbox sessions
@@ -5395,6 +5610,52 @@ components:
           type: string
           format: date-time
 
+    SandboxCheckpoint:
+      type: object
+      required: [id, name, createdAt, files]
+      properties:
+        id:
+          type: string
+          example: "chk_1697630000_abc"
+        name:
+          type: string
+          example: "Initial deployment"
+        description:
+          type: string
+          example: "Deployed contracts and initial storage"
+        createdAt:
+          type: string
+          format: date-time
+        files:
+          type: object
+          additionalProperties: true
+
+    SandboxScenario:
+      type: object
+      required: [id, name, createdAt]
+      properties:
+        id:
+          type: string
+          example: "scen_1697630000_xyz"
+        name:
+          type: string
+          example: "Token transfer test"
+        contractId:
+          type: string
+          example: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+        fn:
+          type: string
+          example: "transfer"
+        args:
+          type: string
+          example: '["GABC...", 100]'
+        description:
+          type: string
+          example: "Transfer 100 tokens to Alice"
+        createdAt:
+          type: string
+          format: date-time
+
     SandboxSimulateResult:
       type: object
       required: [success]
@@ -5415,6 +5676,18 @@ components:
         minResourceFee:
           type: string
           nullable: true
+        ledgerIO:
+          type: object
+          nullable: true
+          properties:
+            readBytes:
+              type: integer
+            writeBytes:
+              type: integer
+            readEntries:
+              type: integer
+            writeEntries:
+              type: integer
         latestLedger:
           type: integer
           nullable: true
