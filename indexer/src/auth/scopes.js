@@ -50,6 +50,7 @@ export const ROUTE_SCOPES = {
   "GET /api/health": PUBLIC,
   "GET /api/metrics": PUBLIC,
   "GET /api/openapi.yaml": PUBLIC,
+  "GET /api/capabilities": PUBLIC,
   "GET /api/csrf-token": PUBLIC,
   "POST /api/csp-report": PUBLIC,
   "GET /api/status/history": PUBLIC,
@@ -93,9 +94,14 @@ export const ROUTE_SCOPES = {
   "DELETE /api/queries/:id": R_EVENTS,
   "GET /graphql": R_EVENTS,
   "POST /graphql": R_EVENTS,
+  "GET /api/sql": R_EVENTS,
+  "POST /api/sql": R_EVENTS,
 
   // Contracts (read + simulation, which does not change state)
   "GET /api/contracts": R_CONTRACTS,
+  "GET /api/contracts/bulk": R_CONTRACTS,
+  "POST /api/contracts/bulk": R_CONTRACTS,
+  "POST /api/contracts/batch": R_CONTRACTS,
   "GET /api/contracts/:id": R_CONTRACTS,
   "GET /api/contracts/:id/abi": R_CONTRACTS,
   "GET /api/contracts/:id/abi-history": R_CONTRACTS,
