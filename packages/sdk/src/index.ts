@@ -7,37 +7,52 @@
  * Run `npm run generate-types` to generate them against docs/api/openapi.yaml.
  */
 
-export interface ClientConfig {
-  baseUrl?: string;
-  apiKey?: string;
-  bearerToken?: string;
-  csrfToken?: string;
-  timeout?: number;
-  headers?: Record<string, string>;
+import type { ClientConfig, RequestOptions, ResponseMetadata, ApiResponse } from './types.js';
+import { createApiError, CancelledError, NetworkError, TimeoutError } from './errors.js';
+import type { EventIterator, EventRecord, IterateEventsOptions } from './events.js';
+import { createEventIterator } from './events.js';
+
+export type { ClientConfig, RequestOptions, ResponseMetadata, ApiResponse } from './types.js';
+export {
+  ExplorerError,
+  ApiError,
+  ValidationError,
+  AuthenticationError,
+  AuthorizationError,
+  NotFoundError,
+  ConflictError,
+  RateLimitError,
+  ServerError,
+  NetworkError,
+  TimeoutError,
+  CancelledError,
+  createApiError,
+  isRetryableStatus,
+  SDK_ERROR_CODES,
+} from './errors.js';
+export { createEventIterator, collectEvents } from './events.js';
+export type { EventRecord, EventPage, EventQuery, EventIterator, IterateEventsOptions, PartialDataWarning } from './events.js';
+
+/**
+ * Combine a caller-supplied signal with the client timeout so cancellation
+ * does not silently disable the timeout (and vice versa).
+ */
+function withTimeout(userSignal: AbortSignal | null | undefined, ms: number): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  if (!userSignal) return timeoutSignal;
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([userSignal, timeoutSignal]);
+  }
+  const controller = new AbortController();
+  if (userSignal.aborted) {
+    controller.abort(userSignal.reason);
+  } else {
+    userSignal.addEventListener('abort', () => controller.abort(userSignal.reason), { once: true });
+  }
+  timeoutSignal.addEventListener('abort', () => controller.abort(timeoutSignal.reason), { once: true });
+  return controller.signal;
 }
 
-export interface RequestOptions extends Omit<RequestInit, 'body'> {
-  body?: unknown;
-  params?: Record<string, string | number | boolean | undefined>;
-}
-
-export interface ResponseMetadata {
-  status: number;
-  statusText: string;
-  headers: Headers;
-  rateLimitLimit?: number;
-  rateLimitRemaining?: number;
-  rateLimitReset?: number;
-  rateLimitTier?: string;
-}
-
-export interface ApiResponse<T> {
-  data: T;
-  meta: ResponseMetadata;
-}
-
-export { verifyEventInclusion } from "./verify.js";
-export type { EventInclusionProof } from "./verify.js";
 export { signRequest } from "./signing.js";
 export type { SignRequestInput } from "./signing.js";
 
@@ -81,13 +96,14 @@ export class ExplorerApiClient {
     endpoint: string,
     options: RequestOptions = {}
   ): Promise<ApiResponse<T>> {
-    const url = this.buildUrl(endpoint, options.params);
+    const { params, signal, ...rest } = options;
+    const url = this.buildUrl(endpoint, params);
     const headers = this.buildHeaders(method);
     const fetchOptions: RequestInit = {
       method,
       headers,
-      signal: AbortSignal.timeout(this.timeout),
-      ...options,
+      ...rest,
+      signal: withTimeout(signal, this.timeout),
       body: options.body ? JSON.stringify(options.body) : undefined,
     };
 
@@ -95,11 +111,18 @@ export class ExplorerApiClient {
     try {
       response = await fetch(url, fetchOptions);
     } catch (error) {
-      if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-        throw new Error(`Network error: ${error.message}`);
-      }
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Request timeout after ${this.timeout}ms`);
+        // Distinguish caller cancellation from a client timeout.
+        if (signal?.aborted) {
+          throw new CancelledError('Request cancelled by caller', { cause: error });
+        }
+        throw new TimeoutError(`Request timeout after ${this.timeout}ms`, {
+          timeoutMs: this.timeout,
+          cause: error,
+        });
+      }
+      if (error instanceof TypeError) {
+        throw new NetworkError(`Network error: ${error.message}`, { cause: error });
       }
       throw error;
     }
@@ -108,10 +131,29 @@ export class ExplorerApiClient {
     const meta = this.extractMetadata(response);
 
     if (!response.ok) {
-      throw new ApiError(response.status, response.statusText, data, meta);
+      throw createApiError(response.status, response.statusText, data, meta);
     }
 
     return { data, meta };
+  }
+
+  /**
+   * Iterate events with automatic cursor pagination (#1080).
+   *
+   * Returns a lazy, cancellable async iterator that follows `next_cursor`
+   * across pages. See `IterateEventsOptions` for filters, page size, bounds
+   * and cancellation.
+   *
+   * ```ts
+   * for await (const event of client.iterateEvents({ contract: 'C...', limit: 100 })) {
+   *   // ...
+   * }
+   * ```
+   */
+  iterateEvents<T = EventRecord>(
+    options: IterateEventsOptions = {},
+  ): EventIterator<T> {
+    return createEventIterator<T>(this, options, '/api/events');
   }
 
   /**
@@ -229,20 +271,8 @@ export class ExplorerApiClient {
   }
 }
 
-/**
- * API error response.
- */
-export class ApiError extends Error {
-  constructor(
-    public status: number,
-    public statusText: string,
-    public data: unknown,
-    public meta: ResponseMetadata
-  ) {
-    super(`API Error ${status}: ${statusText}`);
-    Object.setPrototypeOf(this, ApiError.prototype);
-  }
-}
+// NOTE: The `ApiError` class (and its typed subclasses) now live in
+// `errors.ts` and are re-exported above for backwards compatibility.
 
 /**
  * Create a default client instance.
