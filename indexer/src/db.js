@@ -1391,7 +1391,7 @@ export const db = {
 
   async listAccountApiKeys(accountId) {
     const { rows } = await pool.query(
-      `SELECT id, name, key_prefix, tier, scopes, created_at, expires_at
+      `SELECT id, name, key_prefix, tier, scopes, allowed_contract_ids, allowed_origins, allowed_ips, allowed_endpoints, last_used_at, revoked, revoked_at, created_at, expires_at
        FROM api_keys WHERE account_id = $1 ORDER BY created_at DESC`,
       [accountId],
     );
@@ -3248,6 +3248,128 @@ export const db = {
       [deliveryId],
     );
     return rows[0] ?? null;
+  },
+
+  // ── Repair and replay audit trail (#1118) ─────────────────────────────────
+  async recordRepairAudit({
+    action,
+    actor = "system",
+    range_from = null,
+    range_to = null,
+    reason = "",
+    dry_run = false,
+    status = "started",
+    details = {},
+    completed_at = null,
+  }) {
+    const { rows } = await pool.query(
+      `INSERT INTO repair_audit_trail
+         (action, actor, range_from, range_to, reason, dry_run, status, details, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        action,
+        actor,
+        range_from != null ? parseInt(range_from, 10) : null,
+        range_to != null ? parseInt(range_to, 10) : null,
+        reason || "",
+        Boolean(dry_run),
+        status,
+        JSON.stringify(details || {}),
+        completed_at,
+      ],
+    );
+    const row = rows[0];
+    return {
+      ...row,
+      details: parseJsonField(row.details, {}),
+    };
+  },
+
+  async updateRepairAudit(id, { status, details, completed_at }) {
+    const sets = [];
+    const params = [];
+
+    if (status !== undefined) {
+      sets.push(`status = ${pushParam(params, status)}`);
+    }
+    if (details !== undefined) {
+      sets.push(`details = ${pushParam(params, JSON.stringify(details || {}))}`);
+    }
+    if (completed_at !== undefined) {
+      sets.push(`completed_at = ${pushParam(params, completed_at)}`);
+    }
+
+    if (sets.length === 0) {
+      return this.getRepairAuditById(id);
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE repair_audit_trail SET ${sets.join(", ")} WHERE id = ${pushParam(params, id)} RETURNING *`,
+      params,
+    );
+    if (!rows[0]) return null;
+    return {
+      ...rows[0],
+      details: parseJsonField(rows[0].details, {}),
+    };
+  },
+
+  async getRepairAuditById(id) {
+    const { rows } = await pool.query(
+      `SELECT * FROM repair_audit_trail WHERE id = $1`,
+      [id],
+    );
+    if (!rows[0]) return null;
+    return {
+      ...rows[0],
+      details: parseJsonField(rows[0].details, {}),
+    };
+  },
+
+  async listRepairAudit({ limit = 50, offset = 0, action, actor, status } = {}) {
+    const safeLimit = clampLimit(limit, 50, 200);
+    const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+    const conditions = [];
+    const params = [];
+
+    if (action) {
+      conditions.push(`action = ${pushParam(params, action)}`);
+    }
+    if (actor) {
+      conditions.push(`actor ILIKE ${pushParam(params, `%${escapeLike(actor)}%`)}`);
+    }
+    if (status) {
+      conditions.push(`status = ${pushParam(params, status)}`);
+    }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const countRes = await pool.query(
+      `SELECT COUNT(*)::INT AS total FROM repair_audit_trail ${whereClause}`,
+      params,
+    );
+    const total = countRes.rows[0]?.total ?? 0;
+
+    const dataRes = await pool.query(
+      `SELECT * FROM repair_audit_trail ${whereClause}
+       ORDER BY id DESC
+       LIMIT ${pushParam(params, safeLimit)} OFFSET ${pushParam(params, safeOffset)}`,
+      params,
+    );
+
+    const items = dataRes.rows.map((r) => ({
+      ...r,
+      details: parseJsonField(r.details, {}),
+    }));
+
+    return {
+      data: items,
+      items,
+      total,
+      limit: safeLimit,
+      offset: safeOffset,
+    };
   },
 };
 
