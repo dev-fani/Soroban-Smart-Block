@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, memo, Fragment } from "react";
+import { useMemo, useRef, useLayoutEffect, memo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { api } from "../api";
@@ -17,6 +17,10 @@ import CopyableAddress from "./CopyableAddress";
 import { getGasAlert } from "./GasLimitAlert";
 import ProtocolBadge from "./ProtocolBadge";
 import { addressRoute, truncateAddress, isAccountAddress, isContractAddress, isMuxedAddress } from "../utils/strkey";
+import { readFeedScroll, saveFeedScroll } from "../utils/feedViewState";
+import { feedRowHeight, type FeedDensity } from "../utils/feedDensity";
+import { classifyDecodeState, DECODE_STATE_LABELS } from "../utils/decodeState";
+import { txEventOrder, type TxEventOrder } from "../utils/eventOrdering";
 
 /** Stellar strkey address pattern: G.../C.../M... (56+ chars, base32 alphabet) */
 const ADDRESS_RE = /\b([GCM][A-Z2-7]{55,})\b/g;
@@ -88,6 +92,10 @@ function parseClassicAsset(ev: DecodedEvent): { code: string; issuer: string | n
 interface Props {
   events: DecodedEvent[];
   onReachEnd?: () => void;
+  /** Filter query string used to remember and restore the scroll offset (#1034). */
+  scrollKey?: string;
+  /** Row density (#1035). Defaults to comfortable. */
+  density?: FeedDensity;
 }
 
 const FunctionBadge = memo(function FunctionBadge({ fn, isClassic }: { fn: string; isClassic?: boolean }) {
@@ -218,9 +226,37 @@ const ContractCell = memo(function ContractCell({ contractId, meta }: { contract
 });
 
 /** Render a single event row (extracted so it can be reused in both modes). */
-const DescriptionCell = memo(function DescriptionCell({ ev }: { ev: DecodedEvent }) {
+const EventRow = memo(function EventRow({
+  ev,
+  contractMeta,
+  txOrder,
+}: {
+  ev: DecodedEvent;
+  contractMeta?: ContractMeta;
+  txOrder?: TxEventOrder;
+}) {
   return (
-    <td
+    <>
+      <td style={td}>
+        <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
+        {txOrder && (
+          <span
+            data-testid="tx-event-order"
+            title={`Event ${txOrder.position} of ${txOrder.total} in this transaction, ordered by indexer sequence (seq)`}
+            style={{ display: "block", fontSize: 11, color: "var(--muted)" }}
+          >
+            tx {txOrder.position}/{txOrder.total}
+          </span>
+        )}
+      </td>
+      <td style={td}>{ev.ledger.toLocaleString()}</td>
+      <td style={td}>
+        <ContractCell contractId={ev.contract_id} meta={contractMeta} />
+      </td>
+      <td style={td}>
+        <FunctionBadge fn={ev.function} />
+      </td>
+      <td
         style={{
           ...td,
           maxWidth: 480,
@@ -229,15 +265,23 @@ const DescriptionCell = memo(function DescriptionCell({ ev }: { ev: DecodedEvent
           whiteSpace: "nowrap",
         }}
       >
-        {ev.decode_status && ev.decode_status !== "verified" && (
-          <span
-            className="badge"
-            title={ev.decode_warnings?.join(", ") || "This description was not verified against the contract ABI"}
-            style={{ marginRight: 6, color: "var(--yellow, #f59e0b)" }}
-          >
-            {ev.decode_status === "heuristic" ? "Heuristic" : "Unverified"}
-          </span>
-        )}
+        {(() => {
+          // Distinguish why decoding fell short (#1036) instead of one generic badge.
+          const state = classifyDecodeState(ev);
+          if (state === "decoded") return null;
+          const { label, title } = DECODE_STATE_LABELS[state];
+          const warnings = ev.decode_warnings?.join(", ");
+          return (
+            <span
+              className="badge"
+              data-decode-state={state}
+              title={warnings ? `${title}: ${warnings}` : title}
+              style={{ marginRight: 6, color: "var(--yellow, #f59e0b)" }}
+            >
+              {label}
+            </span>
+          );
+        })()}
         {ev.is_clawback && (
           <span className="badge clawback" style={{ marginRight: 6 }} title="Mandatory authority intervention">
             ⚠ COMPLIANCE: CLAWBACK
@@ -335,16 +379,22 @@ const EventRow = memo(function EventRow({
   );
 });
 
-export default function EventTable({ events, onReachEnd }: Props) {
+export default function EventTable({ events, onReachEnd, scrollKey, density = "comfortable" }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const { totalHeight, visibleItems } = useVirtualList(events, scrollContainerRef);
+  const rowHeight = feedRowHeight(density);
+  const { totalHeight, visibleItems } = useVirtualList(events, scrollContainerRef, rowHeight);
   const navigate = useNavigate();
-  // Visible columns and their order, persisted locally (#1039).
-  const [columns, setColumns] = useState<EventColumnId[]>(loadEventColumns);
-  const updateColumns = (next: EventColumnId[]) => {
-    setColumns(next);
-    saveEventColumns(next);
-  };
+  const restoredRef = useRef(false);
+  const hasRows = events.length > 0;
+
+  // Restore the saved offset once the rows exist, so the spacer is tall enough
+  // to scroll to it (#1034). Runs at most once per mount.
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el || !scrollKey || !hasRows || restoredRef.current) return;
+    restoredRef.current = true;
+    el.scrollTop = readFeedScroll(scrollKey);
+  }, [scrollKey, hasRows]);
 
   // Batch-fetch contract metadata for the badge shown next to each contract
   // name (issue #556) — one request per unique contract on the page, cached
@@ -361,6 +411,8 @@ export default function EventTable({ events, onReachEnd }: Props) {
       retry: false,
     })),
   });
+  // Position of each event within its transaction (#1037), over the loaded events.
+  const txOrderBySeq = useMemo(() => txEventOrder(events), [events]);
   const contractMetaById = useMemo(() => {
     const map = new Map<string, ContractMeta>();
     contractIds.forEach((id, i) => {
@@ -379,8 +431,7 @@ export default function EventTable({ events, onReachEnd }: Props) {
 
   return (
     <div style={{ overflowX: "auto" }}>
-      <EventColumnSettings columns={columns} onChange={updateColumns} />
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }} data-density={density}>
         <thead>
           <tr
             style={{
@@ -408,7 +459,8 @@ export default function EventTable({ events, onReachEnd }: Props) {
         }}
         onScroll={(event) => {
           const target = event.currentTarget;
-          if (onReachEnd && target.scrollTop + target.clientHeight >= target.scrollHeight - ROW_HEIGHT * 4) {
+          if (scrollKey) saveFeedScroll(scrollKey, target.scrollTop);
+          if (onReachEnd && target.scrollTop + target.clientHeight >= target.scrollHeight - rowHeight * 4) {
             onReachEnd();
           }
         }}
@@ -432,11 +484,11 @@ export default function EventTable({ events, onReachEnd }: Props) {
                 }}
               >
                 <tbody>
-                  <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  <tr style={{ borderBottom: "1px solid var(--border)", fontSize: density === "compact" ? 12 : undefined }}>
                     <EventRow
                       ev={item}
                       contractMeta={contractMetaById.get(item.contract_id)}
-                      columns={columns}
+                      txOrder={txOrderBySeq.get(item.seq)}
                     />
                   </tr>
                 </tbody>

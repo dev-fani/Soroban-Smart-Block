@@ -11,6 +11,7 @@ import StatsBar from "../components/StatsBar";
 import LatestLedgers from "../components/LatestLedgers";
 import { useEventStream } from "../hooks/useEventStream";
 import { useMetaTags } from "../hooks/useMetaTags";
+import { parseFeedDensity, type FeedDensity } from "../utils/feedDensity";
 
 const FUNCTIONS = ["", "swap", "transfer", "mint", "burn", "stake", "unstake", "wrap_native", "unwrap_native"];
 
@@ -60,6 +61,7 @@ export default function Home() {
       ? (searchParams.get("type") as TxType)
       : "all",
   );
+  const density: FeedDensity = parseFeedDensity(searchParams.get("density"));
   const [fromDate, setFromDate] = useState(searchParams.get("from") ?? "");
   const [toDate, setToDate] = useState(searchParams.get("to") ?? "");
   const previousContract = useRef(contractParam);
@@ -262,34 +264,25 @@ export default function Home() {
           />
         </label>
 
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--muted)" }}>
-          Ledgers:
-          <input
-            type="number"
-            min={1}
-            placeholder="from"
-            aria-label="From ledger"
-            defaultValue={searchParams.get("from_ledger") ?? ""}
-            onBlur={(event) => updateView({ from_ledger: event.target.value.trim() || undefined })}
-            style={{ width: 110 }}
-          />
-          –
-          <input
-            type="number"
-            min={1}
-            placeholder="to"
-            aria-label="To ledger"
-            defaultValue={searchParams.get("to_ledger") ?? ""}
-            onBlur={(event) => updateView({ to_ledger: event.target.value.trim() || undefined })}
-            style={{ width: 110 }}
-          />
-        </label>
-
-        {filterErrors.length > 0 && (
-          <p role="alert" style={{ color: "var(--danger, #ef4444)", fontSize: 12, width: "100%" }}>
-            {filterErrors.join(" · ")}
-          </p>
-        )}
+        {/* Density toggle (#1035): comfortable is the default, so it clears the param */}
+        <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" }}>
+          {(["comfortable", "compact"] as const).map((value) => (
+            <button
+              key={value}
+              aria-pressed={density === value}
+              onClick={() => updateView({ density: value === "comfortable" ? undefined : value })}
+              style={{
+                background: density === value ? "var(--accent)" : "var(--surface)",
+                color: density === value ? "#0d1117" : "var(--muted)",
+                borderRadius: 0,
+                padding: "6px 14px",
+                fontWeight: density === value ? 700 : 400,
+              }}
+            >
+              {value === "comfortable" ? "Comfortable" : "Compact"}
+            </button>
+          ))}
+        </div>
 
         <ExportButton
           target="events"
@@ -307,6 +300,8 @@ export default function Home() {
         ) : (
           <EventTable
             events={events}
+            scrollKey={searchParams.toString()}
+            density={density}
             onReachEnd={hasNextPage && !isFetchingNextPage ? () => void fetchNextPage() : undefined}
           />
         )}

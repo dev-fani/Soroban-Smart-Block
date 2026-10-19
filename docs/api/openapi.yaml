@@ -690,6 +690,202 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/contracts/{id}/decode-coverage:
+    get:
+      summary: Per-function decode coverage over a ledger range (Issue #1058)
+      description: |
+        Reports, for each function the contract emitted in the inclusive ledger
+        range, how many events were decoded against an ABI or on-chain spec
+        (decode_status `verified` or `unverified`). Events decoded only by
+        heuristic guessing are not counted as decoded. `decode_share` is a ratio
+        between 0 and 1, rounded to four decimals, or null when there are no events.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+        - name: from_ledger
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: First ledger of the range (inclusive)
+        - name: to_ledger
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: Last ledger of the range (inclusive). Must be >= from_ledger.
+      responses:
+        "200":
+          description: Decode coverage for the range
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, from_ledger, to_ledger, total, decoded, decode_share, functions]
+                properties:
+                  contract_id:
+                    type: string
+                  from_ledger:
+                    type: integer
+                  to_ledger:
+                    type: integer
+                  total:
+                    type: integer
+                  decoded:
+                    type: integer
+                  decode_share:
+                    type: number
+                    nullable: true
+                  functions:
+                    type: array
+                    items:
+                      type: object
+                      required: [function, total, decoded, decode_share]
+                      properties:
+                        function:
+                          type: string
+                        total:
+                          type: integer
+                        decoded:
+                          type: integer
+                        decode_share:
+                          type: number
+                          nullable: true
+              example:
+                contract_id: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+                from_ledger: 1000
+                to_ledger: 2000
+                total: 7
+                decoded: 6
+                decode_share: 0.8571
+                functions:
+                  - function: transfer
+                    total: 3
+                    decoded: 2
+                    decode_share: 0.6667
+                  - function: mint
+                    total: 4
+                    decoded: 4
+                    decode_share: 1
+        "400":
+          description: from_ledger or to_ledger is missing, not a positive integer, or from_ledger > to_ledger
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/metadata-corrections:
+    get:
+      summary: Public metadata correction history (Issue #1059)
+      description: |
+        Lists corrections made to a contract's live name or description, newest
+        first. Each entry records the previous value, the new value, the reason and
+        the API key that made the change. Prior contract_versions snapshots are
+        never rewritten.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      responses:
+        "200":
+          description: Corrections for the contract (empty array when none)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, corrections]
+                properties:
+                  contract_id:
+                    type: string
+                  corrections:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MetadataCorrection"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Correct a contract's name or description (Issue #1059)
+      description: |
+        Updates the live field and appends a correction record in one atomic
+        statement. The actor is taken from the authenticated API key and cannot be
+        supplied in the body.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [field, new_value, reason]
+              properties:
+                field:
+                  type: string
+                  enum: [name, description]
+                new_value:
+                  type: string
+                  description: Max 200 characters for name, 2000 for description
+                reason:
+                  type: string
+                  maxLength: 500
+            example:
+              field: name
+              new_value: Soroban Token
+              reason: Corrects a typo in the registered name
+      responses:
+        "201":
+          description: Correction recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetadataCorrection"
+        "400":
+          description: Invalid field, value or reason
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid API key
+        "404":
+          description: Contract not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/admin/abi/import-github:
     post:
       summary: Bulk ABI import from a GitHub repository (Issue #520)
@@ -2013,6 +2209,88 @@ paths:
                     example: true
         "400":
           description: Missing required field or invalid signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{id}/concentration:
+    get:
+      summary: Holder concentration over the current balance snapshot (Issue #1061)
+      description: |
+        Returns the share of total supply held by the top N holders and the
+        Herfindahl-Hirschman index (HHI, 0..10000) computed from holder shares
+        rounded to basis points. Zero, negative and malformed balances are excluded
+        and counted in `invalid_balances`. The source is the current token_holders
+        snapshot only; no historical series is available, indicated by
+        `coverage.historical: false`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Token contract ID
+        - name: top
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+          description: Number of largest holders in the top-N window
+      responses:
+        "200":
+          description: Concentration metrics (shares are null when there are no positive balances)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, holder_count, total_balance_raw, top, top_share, hhi, invalid_balances, coverage]
+                properties:
+                  contract_id:
+                    type: string
+                  holder_count:
+                    type: integer
+                  total_balance_raw:
+                    type: string
+                  top:
+                    type: integer
+                  top_share:
+                    type: number
+                    nullable: true
+                  hhi:
+                    type: number
+                    nullable: true
+                  invalid_balances:
+                    type: integer
+                  coverage:
+                    type: object
+                    properties:
+                      source:
+                        type: string
+                      snapshot:
+                        type: string
+                      historical:
+                        type: boolean
+              example:
+                contract_id: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+                holder_count: 4
+                total_balance_raw: "100"
+                top: 2
+                top_share: 0.5
+                hhi: 2500
+                invalid_balances: 0
+                coverage: { source: token_holders, snapshot: current, historical: false }
+        "400":
+          description: top is not an integer between 1 and 100
           content:
             application/json:
               schema:
@@ -5850,6 +6128,30 @@ components:
           nullable: true
           example: null
 
+    MetadataCorrection:
+      type: object
+      required: [id, contract_id, field, new_value, reason, actor, created_at]
+      properties:
+        id:
+          type: integer
+        contract_id:
+          type: string
+        field:
+          type: string
+          enum: [name, description]
+        old_value:
+          type: string
+          nullable: true
+        new_value:
+          type: string
+        reason:
+          type: string
+        actor:
+          type: string
+          description: API key id that made the correction
+        created_at:
+          type: string
+          format: date-time
     AbiHistoryEntry:
       type: object
       required: [abi_version, functions, registered_by, min_ledger, created_at]
