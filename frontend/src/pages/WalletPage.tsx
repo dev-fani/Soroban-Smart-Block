@@ -7,6 +7,9 @@ import EventTable from "../components/EventTable";
 import ExportButton from "../components/ExportButton";
 import WalletBalances from "../components/WalletBalances";
 import SmartWalletPanel from "../components/SmartWalletPanel";
+import TokenFlowPanel from "../components/TokenFlowPanel";
+import AddressLabelEditor from "../components/AddressLabelEditor";
+import PortfolioSnapshots from "../components/PortfolioSnapshots";
 import ProtocolBadge from "../components/ProtocolBadge";
 import ActivityCalendar from "../components/ActivityCalendar";
 import { useWatchlist } from "./WatchlistPage";
@@ -630,6 +633,13 @@ export default function WalletPage() {
           </button>
         )}
       </div>
+
+      {/* Private browser-side label (#1043) */}
+      {isValidAddress && (
+        <div className="card">
+          <AddressLabelEditor address={address} />
+        </div>
+      )}
 
       {/* XLM balance */}
       {xlmBalance && (
