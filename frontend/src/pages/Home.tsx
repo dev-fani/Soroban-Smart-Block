@@ -294,6 +294,8 @@ export default function Home() {
         />
       </div>
 
+      {!isLoading && <LedgerScrubber events={events} />}
+
       <div className="card">
         {isLoading ? (
           <SkeletonLoader />
