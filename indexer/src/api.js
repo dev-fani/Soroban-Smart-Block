@@ -52,6 +52,7 @@ export function handleCursorError(e, res) {
   return false;
 }
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
+import { detectLookalikeRisk } from "./lookalikeDetector.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
 import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
 import {
@@ -2272,7 +2273,16 @@ export function createApi({ logDestination, dbOverride } = {}) {
             : [];
 
         const advisory = await analyzeSourceDependencies(sourceFiles);
-        res.json({ ...meta, dependency_advisory: advisory });
+        const lookalikeWarning = detectLookalikeRisk(
+          meta.name,
+          meta.id,
+          meta.is_verified,
+        );
+        res.json({
+          ...meta,
+          dependency_advisory: advisory,
+          lookalike_warning: lookalikeWarning,
+        });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }

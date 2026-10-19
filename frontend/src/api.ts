@@ -249,6 +249,14 @@ export interface ContractMeta {
   dependency_advisory?: DependencyAdvisory | null;
   /** Protocol type — auto-tagged from ABI functions or set explicitly. */
   protocol_type?: "token" | "dex" | "lending" | "nft" | "bridge" | "other";
+  lookalike_warning?: {
+    is_lookalike: boolean;
+    resembles: string;
+    authoritative_contract_id: string;
+    warning: string;
+    risk_level: "high" | "medium" | "low";
+    similarity_reason: string;
+  } | null;
 }
 
 export interface ContractStats {

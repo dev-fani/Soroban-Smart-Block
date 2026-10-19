@@ -5391,6 +5391,110 @@ paths:
         "400":
           description: error_class missing
 
+  /api/admin/repair:
+    post:
+      summary: Trigger manual replay or repair action with audit trail (#1118)
+      description: Records actor, range, reason, dry-run mode, status, and completion.
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [range, reason]
+              properties:
+                action:
+                  type: string
+                  default: replay
+                  enum: [replay, repair_range, redecode, reconcile]
+                  example: replay
+                actor:
+                  type: string
+                  example: admin_operator
+                range:
+                  type: object
+                  required: [from, to]
+                  properties:
+                    from:
+                      type: integer
+                      minimum: 0
+                      example: 1000
+                    to:
+                      type: integer
+                      minimum: 0
+                      example: 1050
+                reason:
+                  type: string
+                  example: "Recover ledger gap after RPC reconnect"
+                dry_run:
+                  type: boolean
+                  default: false
+                  example: true
+      responses:
+        "201":
+          description: Repair action initiated/completed and audit record created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepairAuditRecord"
+        "400":
+          description: Invalid input (missing reason or invalid range)
+        "401":
+          description: Unauthorized admin request
+        "500":
+          description: Execution failure recorded in audit trail
+
+  /api/admin/repair/audit:
+    get:
+      summary: List manual repair and replay audit trail (#1118)
+      description: Returns recorded actor, range, reason, dry-run, status, and completion timestamps.
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, running, completed, failed]
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: dry_run
+          in: query
+          schema:
+            type: boolean
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Paginated audit records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RepairAuditRecord"
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+
   /api/admin/api-keys/{id}/signing-secret:
     post:
       summary: Issue a request-signing secret for an API key (#852)
@@ -7151,6 +7255,24 @@ components:
           type: object
           nullable: true
           example: null
+        lookalike_warning:
+          type: object
+          nullable: true
+          description: Phishing-risk context if the contract name resembles a verified brand (Issue #1121)
+          properties:
+            is_lookalike:
+              type: boolean
+            resembles:
+              type: string
+            authoritative_contract_id:
+              type: string
+            warning:
+              type: string
+            risk_level:
+              type: string
+              enum: [high, medium, low]
+            similarity_reason:
+              type: string
 
     MetadataCorrection:
       type: object

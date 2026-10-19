@@ -1514,7 +1514,7 @@ export const db = {
 
   async listAccountApiKeys(accountId) {
     const { rows } = await pool.query(
-      `SELECT id, name, key_prefix, tier, scopes, created_at, expires_at
+      `SELECT id, name, key_prefix, tier, scopes, allowed_contract_ids, allowed_origins, allowed_ips, allowed_endpoints, last_used_at, revoked, revoked_at, created_at, expires_at
        FROM api_keys WHERE account_id = $1 ORDER BY created_at DESC`,
       [accountId],
     );
