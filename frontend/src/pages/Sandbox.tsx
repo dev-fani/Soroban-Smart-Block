@@ -8,15 +8,34 @@ import TemplateSelector from "../components/TemplateSelector";
 import { initWebContainer, mountFiles, runCommand, SandboxFile } from "../services/webcontainer";
 import { getTemplate } from "../services/templates";
 import { generateSandboxId } from "../services/export";
-import { saveSandbox, LocalSandboxHost, SimulationResult, parseArgs, simulateRemote } from "../services/sandbox-api";
+import {
+  saveSandbox,
+  LocalSandboxHost,
+  SimulationResult,
+  ResourceBudget,
+  parseArgs,
+  simulateRemote,
+  createCheckpoint,
+} from "../services/sandbox-api";
 import { createAutoSaver } from "../services/session";
 import { WebContainer } from "@webcontainer/api";
+import XdrInspectorTree from "../components/XdrInspectorTree";
+import SimulationBudgetDeltas from "../components/SimulationBudgetDeltas";
+import TestVectorsPanel from "../components/TestVectorsPanel";
+import CheckpointManager from "../components/CheckpointManager";
 
 const Editor = lazy(() => import("../components/Editor"));
 
-/** Contract simulation via the RPC proxy or the in-browser Soroban host (#925). */
-const SimulationPanel: React.FC = () => {
+interface SimulationPanelProps {
+  sandboxId?: string;
+  files?: Map<string, SandboxFile>;
+  onResetFiles?: (files: Map<string, SandboxFile>) => void;
+}
+
+/** Contract simulation via the RPC proxy or the in-browser Soroban host (#925, #1094, #1096, #1097, #1098). */
+const SimulationPanel: React.FC<SimulationPanelProps> = ({ sandboxId = "", files = new Map(), onResetFiles }) => {
   const hostRef = useRef<LocalSandboxHost | null>(null);
+  const previousBudgetRef = useRef<ResourceBudget | null>(null);
   const [local, setLocal] = useState(false);
   const [contractId, setContractId] = useState("");
   const [fn, setFn] = useState("");
@@ -24,6 +43,8 @@ const SimulationPanel: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [result, setResult] = useState<SimulationResult | null>(null);
+  const [activeTab, setActiveTab] = useState<"simulate" | "vectors" | "xdr" | "checkpoints">("simulate");
+  const [customXdrInput, setCustomXdrInput] = useState("");
 
   const host = async () => {
     if (!hostRef.current) {
@@ -54,45 +75,232 @@ const SimulationPanel: React.FC = () => {
   const simulate = () =>
     withBusy(async () => {
       const a = parseArgs(args);
-      setResult(local ? await (await host()).simulate(contractId, fn, a) : await simulateRemote(contractId, fn, a));
+      const res = local
+        ? await (await host()).simulate(contractId, fn, a, previousBudgetRef.current)
+        : await simulateRemote(contractId, fn, a, previousBudgetRef.current);
+      setResult(res);
+
+      // Save previous budget for next simulation delta comparison (#1096)
+      previousBudgetRef.current = {
+        cpuInsns: res.cpuInsns,
+        memBytes: res.memBytes,
+        ledgerIO: res.ledgerIO,
+        minResourceFee: res.minResourceFee,
+        ledgerIOUnavailable: res.ledgerIOUnavailable,
+        feeUnavailable: res.feeUnavailable,
+      };
     });
+
+  let parsedInputArgs: any[] | null = null;
+  let parseInputError: string | null = null;
+  try {
+    parsedInputArgs = parseArgs(args);
+  } catch (err: any) {
+    parseInputError = err.message;
+  }
 
   return (
     <div className="preview">
-      <div className="preview-header">Contract simulation</div>
+      <div className="preview-header">Contract Simulation & Tools</div>
+      <div style={{ display: "flex", gap: "2px", borderBottom: "1px solid var(--border)", padding: "4px 8px", background: "var(--surface)" }}>
+        <button
+          onClick={() => setActiveTab("simulate")}
+          style={{
+            background: activeTab === "simulate" ? "var(--accent)" : "transparent",
+            color: activeTab === "simulate" ? "var(--accent-contrast, #fff)" : "var(--text)",
+            border: "none",
+            borderRadius: "3px",
+            fontSize: "11px",
+            padding: "2px 8px",
+            cursor: "pointer",
+          }}
+        >
+          Simulate
+        </button>
+        <button
+          onClick={() => setActiveTab("vectors")}
+          style={{
+            background: activeTab === "vectors" ? "var(--accent)" : "transparent",
+            color: activeTab === "vectors" ? "var(--accent-contrast, #fff)" : "var(--text)",
+            border: "none",
+            borderRadius: "3px",
+            fontSize: "11px",
+            padding: "2px 8px",
+            cursor: "pointer",
+          }}
+        >
+          Test Vectors
+        </button>
+        <button
+          onClick={() => setActiveTab("xdr")}
+          style={{
+            background: activeTab === "xdr" ? "var(--accent)" : "transparent",
+            color: activeTab === "xdr" ? "var(--accent-contrast, #fff)" : "var(--text)",
+            border: "none",
+            borderRadius: "3px",
+            fontSize: "11px",
+            padding: "2px 8px",
+            cursor: "pointer",
+          }}
+        >
+          XDR Inspector
+        </button>
+        <button
+          onClick={() => setActiveTab("checkpoints")}
+          style={{
+            background: activeTab === "checkpoints" ? "var(--accent)" : "transparent",
+            color: activeTab === "checkpoints" ? "var(--accent-contrast, #fff)" : "var(--text)",
+            border: "none",
+            borderRadius: "3px",
+            fontSize: "11px",
+            padding: "2px 8px",
+            cursor: "pointer",
+          }}
+        >
+          Checkpoints
+        </button>
+      </div>
+
       <div className="preview-content" style={{ fontSize: "12px", display: "grid", gap: "6px" }}>
-        <label>
-          <input type="checkbox" checked={local} onChange={(e) => setLocal(e.target.checked)} /> Local execution (offline, in-browser host)
-        </label>
-        <input placeholder="Contract ID (C…)" value={contractId} onChange={(e) => setContractId(e.target.value.trim())} />
-        <input placeholder="Function" value={fn} onChange={(e) => setFn(e.target.value.trim())} />
-        <input placeholder='Args (JSON array), e.g. ["G…", 100]' value={args} onChange={(e) => setArgs(e.target.value)} />
-        <div>
-          {local && (
-            <button onClick={importState} disabled={busy || !contractId || !fn}>
-              Import state
-            </button>
-          )}{" "}
-          <button onClick={simulate} disabled={busy || !contractId || !fn}>
-            {busy ? "Working…" : "Simulate"}
-          </button>
-        </div>
-        {status && <div>{status}</div>}
-        {result && (
-          <div data-testid="simulation-result">
-            {result.warnings.map((w) => (
-              <div key={w} style={{ color: "#e5c07b" }}>
-                ⚠ {w}
-              </div>
-            ))}
-            {result.error ? <div style={{ color: "#f48771" }}>✗ {result.error}</div> : <div>Return value (XDR): {result.returnValue}</div>}
+        {activeTab === "simulate" && (
+          <>
+            <label>
+              <input type="checkbox" checked={local} onChange={(e) => setLocal(e.target.checked)} /> Local execution (offline, in-browser host)
+            </label>
+            <input placeholder="Contract ID (C…)" value={contractId} onChange={(e) => setContractId(e.target.value.trim())} />
+            <input placeholder="Function" value={fn} onChange={(e) => setFn(e.target.value.trim())} />
+            <input placeholder='Args (JSON array), e.g. ["G…", 100]' value={args} onChange={(e) => setArgs(e.target.value)} />
             <div>
-              Budget ({result.mode}): {result.cpuInsns.toLocaleString()} CPU instructions · {result.memBytes.toLocaleString()} bytes memory
+              {local && (
+                <button onClick={importState} disabled={busy || !contractId || !fn}>
+                  Import state
+                </button>
+              )}{" "}
+              <button onClick={simulate} disabled={busy || !contractId || !fn}>
+                {busy ? "Working…" : "Simulate"}
+              </button>
             </div>
-            <div>
-              Events: {result.events.length} · State changes: {result.stateDiff.length}
+            {status && <div>{status}</div>}
+
+            {/* Resource budget deltas (#1096) */}
+            <SimulationBudgetDeltas
+              currentBudget={
+                result
+                  ? {
+                      cpuInsns: result.cpuInsns,
+                      memBytes: result.memBytes,
+                      ledgerIO: result.ledgerIO,
+                      minResourceFee: result.minResourceFee,
+                      ledgerIOUnavailable: result.ledgerIOUnavailable,
+                      feeUnavailable: result.feeUnavailable,
+                    }
+                  : null
+              }
+              deltas={result?.budgetDeltas}
+              mode={result?.mode ?? (local ? "local" : "remote")}
+              error={result?.error}
+            />
+
+            {result && (
+              <div data-testid="simulation-result">
+                {result.warnings.map((w) => (
+                  <div key={w} style={{ color: "#e5c07b" }}>
+                    ⚠ {w}
+                  </div>
+                ))}
+                {result.error ? (
+                  <div style={{ color: "#f48771" }}>✗ {result.error}</div>
+                ) : (
+                  <XdrInspectorTree title="Return Value (XDR Tree)" xdrBase64={result.returnValue} />
+                )}
+                {result.events && result.events.length > 0 && (
+                  <div style={{ marginTop: "4px" }}>
+                    <div style={{ fontWeight: 600, fontSize: "11px", color: "var(--muted)" }}>Events ({result.events.length}):</div>
+                    {result.events.map((ev, i) => (
+                      <XdrInspectorTree key={i} title={`Event #${i + 1}`} xdrBase64={ev} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        {activeTab === "vectors" && (
+          <TestVectorsPanel
+            onSelectVector={(newArgs) => {
+              setArgs(newArgs);
+              setActiveTab("simulate");
+            }}
+          />
+        )}
+
+        {activeTab === "xdr" && (
+          <div>
+            <div style={{ marginBottom: "8px" }}>
+              <div style={{ fontWeight: 600, marginBottom: "4px" }}>Simulation Input XDR Inspector</div>
+              {parseInputError ? (
+                <div style={{ color: "#f48771", fontSize: "11px" }}>✗ Invalid JSON arguments: {parseInputError}</div>
+              ) : parsedInputArgs && parsedInputArgs.length > 0 ? (
+                <XdrInspectorTree title="Input Arguments (XDR Tree)" scValList={parsedInputArgs} />
+              ) : (
+                <div style={{ color: "var(--muted)", fontStyle: "italic", fontSize: "11px" }}>No input arguments provided.</div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: "8px" }}>
+              <div style={{ fontWeight: 600, marginBottom: "4px" }}>Simulation Output XDR Inspector</div>
+              {result?.returnValue ? (
+                <XdrInspectorTree title="Return Value (XDR Tree)" xdrBase64={result.returnValue} />
+              ) : (
+                <div style={{ color: "var(--muted)", fontStyle: "italic", fontSize: "11px" }}>
+                  No return value yet. Run a simulation to inspect output.
+                </div>
+              )}
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: "8px" }}>
+              <div style={{ fontWeight: 600, marginBottom: "4px" }}>Inspect Custom XDR (with Raw Fallback)</div>
+              <textarea
+                placeholder="Paste raw Base64 XDR string to inspect tree..."
+                value={customXdrInput}
+                onChange={(e) => setCustomXdrInput(e.target.value)}
+                rows={2}
+                style={{
+                  width: "100%",
+                  fontFamily: "monospace",
+                  fontSize: "11px",
+                  padding: "4px",
+                  backgroundColor: "var(--bg)",
+                  color: "var(--text)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "4px",
+                  boxSizing: "border-box",
+                  marginBottom: "4px",
+                }}
+              />
+              {customXdrInput && <XdrInspectorTree title="Custom XDR Payload" xdrBase64={customXdrInput} />}
             </div>
           </div>
+        )}
+
+        {activeTab === "checkpoints" && (
+          <CheckpointManager
+            sandboxId={sandboxId}
+            files={files}
+            onFilesReset={(newFiles) => {
+              if (onResetFiles) onResetFiles(newFiles);
+            }}
+            currentContractId={contractId}
+            currentFn={fn}
+            currentArgs={args}
+            onLoadScenario={(sc) => {
+              setContractId(sc.contractId);
+              setFn(sc.fn);
+              setArgs(sc.args);
+              setActiveTab("simulate");
+            }}
+          />
         )}
       </div>
     </div>
@@ -134,6 +342,11 @@ const Sandbox: React.FC = () => {
       // Persist to backend
       await saveSandbox(sandboxId, templateId, templateMap);
 
+      // Create initial named checkpoint for non-destructive reset (#1098)
+      createCheckpoint(sandboxId, "Initial Template State", `Initialized template: ${template.name}`, templateMap).catch((e) => {
+        console.warn("Failed to create initial checkpoint:", e);
+      });
+
       setTerminalOutput(["> Sandbox initialized with " + template.name]);
       setShowTemplateSelector(false);
     } catch (error) {
@@ -160,6 +373,22 @@ const Sandbox: React.FC = () => {
       const newFiles = new Map(files).set(selectedFile, updatedFile);
       setFiles(newFiles);
     }
+  };
+
+  const handleResetFiles = async (newFiles: Map<string, SandboxFile>) => {
+    setFiles(newFiles);
+    if (webcontainerRef.current) {
+      try {
+        await mountFiles(webcontainerRef.current, newFiles);
+      } catch (err) {
+        console.warn("Failed to re-mount files in WebContainer:", err);
+      }
+    }
+    const firstKey = Array.from(newFiles.keys())[0];
+    if (firstKey) {
+      setSelectedFile(firstKey);
+    }
+    setTerminalOutput((prev) => [...prev, "> Environment restored from checkpoint."]);
   };
 
   // Auto-persist files when they change
@@ -226,7 +455,15 @@ const Sandbox: React.FC = () => {
         </button>
       </div>
 
-      <ActionBar files={files} sandboxId={sandboxId} />
+      <ActionBar
+        files={files}
+        sandboxId={sandboxId}
+        onSaveCheckpoint={() => {
+          createCheckpoint(sandboxId, `Checkpoint ${new Date().toLocaleTimeString()}`, "Manual checkpoint", files)
+            .then(() => setTerminalOutput((prev) => [...prev, "> Checkpoint saved."]))
+            .catch(() => {});
+        }}
+      />
 
       <div className="sandbox-layout">
         <FileExplorer files={Array.from(files.values())} selectedFile={selectedFile} onSelectFile={handleFileSelect} />
@@ -243,7 +480,7 @@ const Sandbox: React.FC = () => {
 
         <div className="right-panel">
           <Preview packageJsonContent={files.get("package.json")?.content || ""} />
-          <SimulationPanel />
+          <SimulationPanel sandboxId={sandboxId} files={files} onResetFiles={handleResetFiles} />
           <Terminal output={terminalOutput} />
         </div>
       </div>

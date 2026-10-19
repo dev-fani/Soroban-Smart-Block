@@ -1,283 +1,330 @@
 /**
- * Typed event iterators with automatic cursor pagination (#1080).
+ * Generated event-type helpers and typed decoders from ABI metadata (#1085).
  *
- * `GET /api/events` returns a page plus an opaque `next_cursor`. Following it
- * by hand means re-issuing the same query with the cursor, guarding against
- * the cursor not advancing, and handling cancellation.
- *
- * `createEventIterator` does that once, exposing:
- *   - automatic cursor-following across pages,
- *   - `AbortSignal` cancellation (also via `.cancel()`),
- *   - correct empty-page handling (a page with no rows ends iteration even
- *     if the server echoed a cursor back).
- *
- * The iterator is lazy — no request is issued until the first `next()`, and
- * it stops as soon as the caller breaks out of a loop.
+ * Generates typed decoders from contract ABI metadata while preserving raw XDR
+ * access and retaining unknown fields.
  */
 
-import type { ApiResponse } from './types.js';
-import { CancelledError } from './errors.js';
-
-/** A decoded explorer event. Extra server fields are preserved. */
-export interface EventRecord {
-  seq: number;
-  contract_id?: string | null;
-  function?: string;
-  ledger?: number;
+export interface ParamDef {
+  name: string;
+  kind: string;
   description?: string;
-  raw_topics?: string[];
-  raw_data?: string;
-  tx_hash?: string;
-  type?: string;
-  decode_status?: string;
-  decode_warnings?: string[];
+}
+
+export interface FunctionAbi {
+  name: string;
+  description?: string;
+  params: ParamDef[];
+  return_type?: string;
+}
+
+export interface ContractMeta {
+  name?: string;
+  description?: string;
+  version?: number;
+  abi_version?: number;
+  min_ledger?: number;
+  functions: FunctionAbi[];
+  registered_by?: string;
   [key: string]: unknown;
 }
 
-/** A partial-data warning attached to a page (#1079). */
-export interface PartialDataWarning {
-  code: string;
-  message: string;
+export interface RawEvent {
+  contract_id?: string;
+  function?: string;
+  ledger?: number;
+  tx_hash?: string;
+  seq?: number;
+  raw_topics?: (string | unknown)[];
+  raw_data?: string | unknown;
+  raw_xdr?: string;
+  event_xdr?: string;
+  description?: string;
+  [key: string]: unknown;
 }
 
-/** The page shape returned by the events endpoints. */
-export interface EventPage<T = EventRecord> {
-  data: T[];
-  next_cursor?: string | number | null;
-  page_info?: {
-    has_next: boolean;
-    has_previous: boolean;
-    start_cursor: string | null;
-    end_cursor: string | null;
-  };
-  total?: number;
-  count_is_estimate?: boolean;
-  warnings?: PartialDataWarning[];
+export interface DecodedContractEvent<TArgs = Record<string, unknown>> {
+  contract_id?: string;
+  function: string;
+  args: TArgs;
+  abi_match: boolean;
+  function_abi?: FunctionAbi;
+  ledger?: number;
+  tx_hash?: string;
+  seq?: number;
+  raw_topics?: (string | unknown)[];
+  raw_data?: string | unknown;
+  raw_xdr?: string;
+  event_xdr?: string;
+  description?: string;
+  [key: string]: unknown;
 }
 
-/** Filters understood by `GET /api/events`. */
-export interface EventQuery {
-  contract?: string;
-  fn?: string;
-  type?: string;
-  count?: 'exact' | 'estimate';
-  from?: string;
-  to?: string;
+export interface EventDecoder<TMap extends Record<string, any> = Record<string, any>> {
+  /** Decodes a raw event into a typed event structure. */
+  decode<K extends keyof TMap & string = string>(
+    event: RawEvent
+  ): DecodedContractEvent<K extends keyof TMap ? TMap[K] : Record<string, unknown>>;
+  /** Returns list of functions supported by this decoder's ABI. */
+  supportedFunctions: string[];
+  /** Check if a function name is registered in this decoder. */
+  hasFunction(name: string): boolean;
+  /** Get the ABI definition for a specific function. */
+  getFunctionAbi(name: string): FunctionAbi | undefined;
 }
 
-export interface IterateEventsOptions extends EventQuery {
-  /** Page size; the server clamps this to its own maximum. */
-  limit?: number;
-  /** Stop after fetching this many events. Useful for bounded consumption. */
-  maxEvents?: number;
-  /** Stop after this many pages, even if more data remains. */
-  maxPages?: number;
-  /** Start from a cursor (e.g. the `next_cursor` of a previous response). */
-  cursor?: string | number;
-  /** Cancels iteration; rejects an in-flight request. */
-  signal?: AbortSignal;
-  /**
-   * When false, an empty page with a fresh cursor keeps advancing instead of
-   * terminating. Defaults to true, which treats an empty page as the end.
-   */
-  stopOnEmptyPage?: boolean;
-}
-
-/**
- * Structural shape the iterator needs — satisfied by `ExplorerApiClient`
- * without creating a runtime dependency on it.
- */
-export interface EventSourceClient {
-  get<T>(
-    endpoint: string,
-    options?: { params?: Record<string, string | number | boolean | undefined>; signal?: AbortSignal },
-  ): Promise<ApiResponse<T>>;
-}
-
-const DEFAULT_EVENT_ENDPOINT = '/api/events';
-
-function buildParams(options: IterateEventsOptions, cursor?: string | number): Record<string, string | number | boolean> {
-  const params: Record<string, string | number | boolean> = {};
-  if (options.contract !== undefined) params.contract = options.contract;
-  if (options.fn !== undefined) params.fn = options.fn;
-  if (options.type !== undefined) params.type = options.type;
-  if (options.count !== undefined) params.count = options.count;
-  if (options.from !== undefined) params.from = options.from;
-  if (options.to !== undefined) params.to = options.to;
-  if (options.limit !== undefined) params.limit = options.limit;
-  if (cursor !== undefined) params.after_seq = cursor;
-  return params;
+export interface GenerateTypesOptions {
+  /** Name of the exported TypeScript namespace or type. Defaults to contract name or 'ContractEvents'. */
+  typeName?: string;
+  /** Whether to export an event map type. Default: true. */
+  exportEventMap?: boolean;
 }
 
 /**
- * A reusable, cancellable cursor-following iterator over events.
+ * Extracts function name and positional values from a raw event.
  */
-export interface EventIterator<T = EventRecord> extends AsyncIterableIterator<T> {
-  /** Stop iterating and abort any in-flight request. */
-  cancel(): void;
-  /** The cursor that will be used for the next page, if known. */
-  readonly cursor: string | number | undefined;
-}
+function extractEventValues(event: RawEvent): {
+  fnName: string;
+  values: unknown[];
+} {
+  let fnName = event.function ?? '';
+  const topics = Array.isArray(event.raw_topics) ? event.raw_topics : [];
+  let positionalTopics: unknown[] = [];
 
-/**
- * Create a cursor-following iterator over the events endpoint.
- *
- * ```ts
- * for await (const event of client.iterateEvents({ contract: 'C...' })) {
- *   if (event.decode_status === 'unverified') continue;
- *   if (event.seq < 1000) break; // stops fetching further pages
- * }
- * ```
- *
- * @param client an `EventSourceClient` (typically `ExplorerApiClient`)
- * @param options filters, page size, limits and cancellation
- * @param endpoint defaults to `/api/events`
- */
-export function createEventIterator<T = EventRecord>(
-  client: EventSourceClient,
-  options: IterateEventsOptions = {},
-  endpoint: string = DEFAULT_EVENT_ENDPOINT,
-): EventIterator<T> {
-  let cursor = options.cursor;
-  let buffer: T[] = [];
-  let pending: Promise<EventPage<T>> | null = null;
-  let done = false;
-  // Set once we know there is no further page to fetch (empty page, a null
-  // next_cursor, or a server that echoed the cursor we sent).
-  let exhausted = false;
-  let eventsServed = 0;
-  let pagesFetched = 0;
-  const controller = new AbortController();
-
-  // If the caller supplied a signal, honour it too.
-  if (options.signal) {
-    if (options.signal.aborted) {
-      controller.abort(options.signal.reason);
+  if (topics.length > 0) {
+    const first = topics[0];
+    const firstStr = typeof first === 'string' ? first : String(first ?? '');
+    if (!fnName || fnName === 'unknown') {
+      fnName = firstStr;
+      positionalTopics = topics.slice(1);
+    } else if (firstStr.toLowerCase() === fnName.toLowerCase()) {
+      positionalTopics = topics.slice(1);
     } else {
-      options.signal.addEventListener('abort', () => controller.abort(options.signal!.reason), { once: true });
+      positionalTopics = topics;
     }
   }
 
-  const throwIfCancelled = () => {
-    if (controller.signal.aborted) {
-      throw new CancelledError('Event iteration cancelled');
-    }
-  };
-
-  const fetchPage = (): Promise<EventPage<T>> => {
-    if (!pending) {
-      throwIfCancelled();
-      pending = client
-        .get<EventPage<T>>(endpoint, { params: buildParams(options, cursor), signal: controller.signal })
-        .then((res) => {
-          pagesFetched += 1;
-          pending = null;
-          return res.data;
-        });
-    }
-    return pending;
-  };
-
-  const iterator: EventIterator<T> = {
-    cancel() {
-      controller.abort();
-      done = true;
-    },
-    get cursor() {
-      return cursor;
-    },
-    [Symbol.asyncIterator]() {
-      return this;
-    },
-    async next(): Promise<IteratorResult<T>> {
-      throwIfCancelled();
-
-      // Respect the stop conditions before fetching another page.
-      if (done) return { done: true, value: undefined };
-      if (options.maxEvents !== undefined && eventsServed >= options.maxEvents) {
-        done = true;
-        return { done: true, value: undefined };
-      }
-
-      if (buffer.length === 0) {
-        // maxPages bounds how many pages we fetch — it only gates a fetch,
-        // not draining rows we already have in hand.
-        if (options.maxPages !== undefined && pagesFetched >= options.maxPages) {
-          done = true;
-          return { done: true, value: undefined };
-        }
-        // Once we know there is nothing left to fetch, stop for good.
-        if (exhausted) {
-          done = true;
-          return { done: true, value: undefined };
-        }
-
-        let page: EventPage<T>;
+  const values = [...positionalTopics];
+  if (event.raw_data !== undefined && event.raw_data !== null && event.raw_data !== '') {
+    // If raw_data is a JSON string of arguments or array
+    if (typeof event.raw_data === 'string') {
+      const trimmed = event.raw_data.trim();
+      if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
         try {
-          page = await fetchPage();
-          // The fetch may have resolved even though the iterator was cancelled
-          // mid-flight — surface it rather than serving a stale page.
-          throwIfCancelled();
-        } catch (err) {
-          done = true;
-          throw err;
-        }
-
-        const rows = Array.isArray(page?.data) ? page.data : [];
-
-        // An empty page means the end of the feed — even if the server
-        // echoed a cursor back, advancing on it would never terminate.
-        if (rows.length === 0) {
-          exhausted = true;
-          buffer = [];
-        } else {
-          buffer = rows;
-          const next = page.next_cursor;
-          if (next === undefined || next === null || String(next) === String(cursor)) {
-            // No forward cursor, or the server repeated the one we sent —
-            // keep this page's rows but do not ask for another page.
-            exhausted = true;
+          const parsed = JSON.parse(trimmed);
+          if (Array.isArray(parsed)) {
+            values.push(...parsed);
           } else {
-            cursor = next;
+            values.push(parsed);
           }
+        } catch {
+          values.push(event.raw_data);
         }
+      } else {
+        values.push(event.raw_data);
       }
+    } else if (Array.isArray(event.raw_data)) {
+      values.push(...event.raw_data);
+    } else {
+      values.push(event.raw_data);
+    }
+  }
 
-      if (buffer.length === 0) {
-        done = true;
-        return { done: true, value: undefined };
-      }
-
-      const value = buffer.shift() as T;
-      eventsServed += 1;
-      if (options.maxEvents !== undefined && eventsServed >= options.maxEvents) {
-        done = true;
-      }
-      return { done: false, value };
-    },
-
-    async return(): Promise<IteratorResult<T>> {
-      done = true;
-      controller.abort();
-      return { done: true, value: undefined };
-    },
-  };
-
-  return iterator;
+  return { fnName: fnName || 'unknown', values };
 }
 
 /**
- * Convenience: collect every event the iterator yields into an array.
- * Subject to the same `maxEvents` / `maxPages` bounds as the iterator.
+ * Normalizes ABI functions into a lookup Map.
  */
-export async function collectEvents<T = EventRecord>(
-  iterator: AsyncIterableIterator<T>,
-  maxEvents?: number,
-): Promise<T[]> {
-  const out: T[] = [];
-  for await (const event of iterator) {
-    out.push(event);
-    if (maxEvents !== undefined && out.length >= maxEvents) break;
+function normalizeAbiFunctions(abi: ContractMeta | FunctionAbi[] | Record<string, FunctionAbi>): Map<string, FunctionAbi> {
+  const map = new Map<string, FunctionAbi>();
+  if (!abi) return map;
+
+  let list: FunctionAbi[] = [];
+  if (Array.isArray(abi)) {
+    list = abi;
+  } else if ('functions' in abi && Array.isArray(abi.functions)) {
+    list = abi.functions;
+  } else if (typeof abi === 'object') {
+    list = Object.values(abi) as FunctionAbi[];
   }
-  return out;
+
+  for (const fn of list) {
+    if (fn && fn.name) {
+      map.set(fn.name, fn);
+      map.set(fn.name.toLowerCase(), fn);
+    }
+  }
+
+  return map;
+}
+
+/**
+ * Decodes a raw event using contract ABI metadata while retaining raw XDR access
+ * and any unknown fields.
+ *
+ * @param event Raw event from explorer API, WebSocket, or Soroban RPC
+ * @param abi Contract ABI metadata
+ */
+export function decodeEventWithAbi<TArgs = Record<string, unknown>>(
+  event: RawEvent,
+  abi: ContractMeta | FunctionAbi[] | Record<string, FunctionAbi>
+): DecodedContractEvent<TArgs> {
+  if (!event || typeof event !== 'object') {
+    throw new TypeError('Expected event to be an object');
+  }
+
+  const abiMap = normalizeAbiFunctions(abi);
+  const { fnName, values } = extractEventValues(event);
+  const fnAbi = abiMap.get(fnName) || abiMap.get(fnName.toLowerCase());
+
+  const args: Record<string, unknown> = {};
+
+  if (fnAbi && Array.isArray(fnAbi.params)) {
+    // Map known positional params
+    for (let i = 0; i < fnAbi.params.length; i++) {
+      const param = fnAbi.params[i];
+      if (param && param.name) {
+        args[param.name] = i < values.length ? values[i] : undefined;
+      }
+    }
+
+    // Retain any excess positional arguments as unknown fields
+    if (values.length > fnAbi.params.length) {
+      args._unknown_params = values.slice(fnAbi.params.length);
+    }
+  } else {
+    // No matching ABI function found — retain positional arguments
+    if (values.length > 0) {
+      args._positional = values;
+    }
+  }
+
+  // Preserve all event properties (including raw_xdr, event_xdr, raw_topics, raw_data, and unknown fields)
+  const result: DecodedContractEvent<TArgs> = {
+    ...event,
+    function: fnName,
+    args: args as TArgs,
+    abi_match: Boolean(fnAbi),
+    function_abi: fnAbi,
+  };
+
+  return result;
+}
+
+/**
+ * Creates a reusable typed event decoder for a contract.
+ *
+ * @param abi Contract metadata or function ABI array
+ */
+export function createEventDecoder<TMap extends Record<string, any> = Record<string, any>>(
+  abi: ContractMeta | FunctionAbi[] | Record<string, FunctionAbi>
+): EventDecoder<TMap> {
+  const abiMap = normalizeAbiFunctions(abi);
+  const functions = Array.from(new Set(Array.from(abiMap.values()).map((f) => f.name)));
+
+  return {
+    decode<K extends keyof TMap & string = string>(
+      event: RawEvent
+    ): DecodedContractEvent<K extends keyof TMap ? TMap[K] : Record<string, unknown>> {
+      return decodeEventWithAbi(event, abi) as any;
+    },
+    supportedFunctions: functions,
+    hasFunction(name: string): boolean {
+      return abiMap.has(name) || abiMap.has(name.toLowerCase());
+    },
+    getFunctionAbi(name: string): FunctionAbi | undefined {
+      return abiMap.get(name) || abiMap.get(name.toLowerCase());
+    },
+  };
+}
+
+/**
+ * Maps Soroban ABI parameter types to TypeScript types.
+ */
+function mapParamTypeToTs(kind: string): string {
+  const lower = (kind || '').toLowerCase();
+  if (lower.includes('address') || lower.includes('contract')) return 'string';
+  if (lower.includes('bool')) return 'boolean';
+  if (lower.includes('string') || lower.includes('symbol')) return 'string';
+  if (lower.includes('i128') || lower.includes('u128') || lower.includes('i64') || lower.includes('u64')) {
+    return 'string | bigint | number';
+  }
+  if (lower.includes('u32') || lower.includes('i32') || lower.includes('u16') || lower.includes('i16')) {
+    return 'number';
+  }
+  if (lower.includes('bytes') || lower.includes('vec')) return 'unknown[] | string';
+  return 'unknown';
+}
+
+/**
+ * Generates TypeScript type definitions from Contract ABI metadata.
+ * Retains raw XDR access and unknown fields in the generated interface definitions.
+ */
+export function generateEventTypes(
+  meta: ContractMeta,
+  options: GenerateTypesOptions = {}
+): string {
+  const contractName =
+    options.typeName ||
+    (meta.name ? meta.name.replace(/[^a-zA-Z0-9]/g, '') : 'Contract') + 'Events';
+  const functions = meta.functions || [];
+
+  const lines: string[] = [
+    '/**',
+    ` * Autogenerated event type definitions for ${meta.name || 'Contract'} (${meta.description || ''})`,
+    ' * Retains raw XDR access and open indexing for unknown fields.',
+    ' */',
+    '',
+    `export namespace ${contractName} {`,
+  ];
+
+  const mapEntries: string[] = [];
+
+  for (const fn of functions) {
+    const fnInterfaceName = `${fn.name.charAt(0).toUpperCase() + fn.name.slice(1)}Event`;
+    const argsInterfaceName = `${fn.name.charAt(0).toUpperCase() + fn.name.slice(1)}Args`;
+
+    lines.push(`  export interface ${argsInterfaceName} {`);
+    for (const param of fn.params || []) {
+      const tsType = mapParamTypeToTs(param.kind);
+      lines.push(`    /** ${param.description || param.kind} */`);
+      lines.push(`    ${param.name}: ${tsType};`);
+    }
+    lines.push('    /** Additional or unknown arguments */');
+    lines.push('    [key: string]: unknown;');
+    lines.push('  }');
+    lines.push('');
+
+    lines.push(`  export interface ${fnInterfaceName} {`);
+    lines.push(`    function: '${fn.name}';`);
+    lines.push(`    args: ${argsInterfaceName};`);
+    lines.push('    contract_id?: string;');
+    lines.push('    ledger?: number;');
+    lines.push('    tx_hash?: string;');
+    lines.push('    seq?: number;');
+    lines.push('    raw_topics?: (string | unknown)[];');
+    lines.push('    raw_data?: string | unknown;');
+    lines.push('    raw_xdr?: string;');
+    lines.push('    event_xdr?: string;');
+    lines.push('    description?: string;');
+    lines.push('    /** Retains unknown fields from newer indexer or contract versions */');
+    lines.push('    [key: string]: unknown;');
+    lines.push('  }');
+    lines.push('');
+
+    mapEntries.push(`    '${fn.name}': ${argsInterfaceName};`);
+  }
+
+  if (options.exportEventMap !== false) {
+    lines.push('  export interface EventMap {');
+    lines.push(...mapEntries);
+    lines.push('    [key: string]: Record<string, unknown>;');
+    lines.push('  }');
+  }
+
+  lines.push('}');
+  lines.push('');
+
+  return lines.join('\n');
 }

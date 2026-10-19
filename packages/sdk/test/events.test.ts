@@ -1,150 +1,228 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createEventIterator, collectEvents } from '../src/events';
-import type { EventPage, EventSourceClient } from '../src/events';
-import { ExplorerApiClient } from '../src/index';
-import { CancelledError, ApiError } from '../src/errors';
+import { describe, it, expect } from 'vitest';
+import {
+  createEventDecoder,
+  decodeEventWithAbi,
+  generateEventTypes,
+  ContractMeta,
+  RawEvent,
+} from '../src/events.js';
 
-/** A fake EventSourceClient that serves a scripted sequence of pages. */
-function fakeClient(pages: Array<EventPage | Error>): EventSourceClient & { calls: Array<Record<string, unknown>>; signal?: AbortSignal } {
-  const calls: Array<Record<string, unknown>> = [];
-  let i = 0;
-  return {
-    calls,
-    async get<T>(_endpoint: string, options?: { params?: Record<string, unknown>; signal?: AbortSignal }) {
-      calls.push(options?.params ?? {});
-      const next = pages[i++];
-      if (next instanceof Error) throw next;
-      return { data: next as unknown as T, meta: { status: 200, statusText: 'OK', headers: new Headers() } };
-    },
-  };
-}
-
-const page = (seqs: number[], next: number | null): EventPage => ({
-  data: seqs.map((seq) => ({ seq, function: 'transfer' })),
-  next_cursor: next,
-  page_info: { has_next: next !== null, has_previous: false, start_cursor: null, end_cursor: null },
-});
-
-describe('createEventIterator (#1080)', () => {
-  it('follows next_cursor across pages and stops when the cursor is null', async () => {
-    const client = fakeClient([page([3, 2], 2), page([1], null)]);
-    const iter = createEventIterator(client, { limit: 2 });
-    const seqs = await collectEvents(iter);
-    expect(seqs.map((e: { seq: number }) => e.seq)).toEqual([3, 2, 1]);
-    // two page fetches only
-    expect(client.calls).toHaveLength(2);
-    expect(client.calls[0].limit).toBe(2);
-    expect(client.calls[1].after_seq).toBe(2);
-  });
-
-  it('does not fetch another page after an empty first page', async () => {
-    const client = fakeClient([{ data: [], next_cursor: 999 }]);
-    const seqs = await collectEvents(createEventIterator(client));
-    expect(seqs).toEqual([]);
-    expect(client.calls).toHaveLength(1);
-  });
-
-  it('stops when the server repeats the cursor we sent', async () => {
-    const client = fakeClient([{ data: [{ seq: 7 }], next_cursor: 5 }, { data: [{ seq: 6 }], next_cursor: 5 }]);
-    const iter = createEventIterator(client, { cursor: 5 });
-    const seqs = await collectEvents(iter);
-    // The echoed cursor would re-request the same page, so iteration ends
-    // after serving the rows we already have.
-    expect(seqs.map((e: { seq: number }) => e.seq)).toEqual([7]);
-    expect(client.calls).toHaveLength(1);
-  });
-
-  it('honours maxEvents without fetching more pages', async () => {
-    const client = fakeClient([page([5, 4, 3], 3), page([2, 1], null)]);
-    const seqs = await collectEvents(createEventIterator(client, { limit: 3, maxEvents: 2 }));
-    expect(seqs.map((e: { seq: number }) => e.seq)).toEqual([5, 4]);
-    expect(client.calls).toHaveLength(1);
-  });
-
-  it('honours maxPages', async () => {
-    const client = fakeClient([page([5, 4], 4), page([3, 2], 2), page([1], null)]);
-    const seqs = await collectEvents(createEventIterator(client, { maxPages: 1 }));
-    expect(seqs.map((e: { seq: number }) => e.seq)).toEqual([5, 4]);
-    expect(client.calls).toHaveLength(1);
-  });
-
-  it('passes filters through to the request', async () => {
-    const client = fakeClient([{ data: [], next_cursor: null }]);
-    await collectEvents(createEventIterator(client, { contract: 'C1', fn: 'swap', type: 'soroban', count: 'exact' }));
-    expect(client.calls[0]).toMatchObject({ contract: 'C1', fn: 'swap', type: 'soroban', count: 'exact' });
-    // no cursor on the first page
-    expect(client.calls[0].after_seq).toBeUndefined();
-  });
-
-  it('cancels iteration and aborts in-flight work via .cancel()', async () => {
-    const controller = new AbortController();
-    const client: EventSourceClient = {
-      async get<T>(_e: string, options?: { signal?: AbortSignal }) {
-        options?.signal?.addEventListener('abort', () => controller.abort());
-        await new Promise((r) => setTimeout(r, 5));
-        return { data: page([1], null) as unknown as T, meta: { status: 200, statusText: 'OK', headers: new Headers() } };
+describe('Generated event-type helpers from ABI metadata (#1085)', () => {
+  const tokenAbi: ContractMeta = {
+    name: 'ExampleToken',
+    description: 'A SEP-41 token contract',
+    version: 1,
+    functions: [
+      {
+        name: 'transfer',
+        description: 'Transfer tokens from sender to receiver',
+        params: [
+          { name: 'from', kind: 'Address', description: 'Sender address' },
+          { name: 'to', kind: 'Address', description: 'Recipient address' },
+          { name: 'amount', kind: 'i128', description: 'Transfer amount' },
+        ],
       },
-    };
-    const iter = createEventIterator(client);
-    const pending = iter.next();
-    iter.cancel();
-    await expect(pending).rejects.toThrow(CancelledError);
-  });
+      {
+        name: 'mint',
+        description: 'Mint new tokens',
+        params: [
+          { name: 'to', kind: 'Address' },
+          { name: 'amount', kind: 'i128' },
+        ],
+      },
+      {
+        name: 'balance',
+        params: [{ name: 'id', kind: 'Address' }],
+      },
+    ],
+  };
 
-  it('is not re-iterable after completion and stops after done', async () => {
-    const client = fakeClient([page([2, 1], null)]);
-    const iter = createEventIterator(client);
-    await collectEvents(iter);
-    const after = await iter.next();
-    expect(after.done).toBe(true);
-  });
+  describe('decodeEventWithAbi', () => {
+    it('decodes known ABI function with named parameters', () => {
+      const rawEvent: RawEvent = {
+        contract_id: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        function: 'transfer',
+        ledger: 12345,
+        tx_hash: 'tx_hash_abc',
+        seq: 1,
+        raw_topics: ['transfer', 'G_SENDER', 'G_RECEIVER'],
+        raw_data: '1000000',
+        raw_xdr: 'AAAA...RAWXDR...',
+        event_xdr: 'BBBB...EVENTXDR...',
+        description: 'Human readable description',
+      };
 
-  it('does not issue any request until first next()', () => {
-    const client = fakeClient([page([1], null)]);
-    createEventIterator(client);
-    expect(client.calls).toHaveLength(0);
-  });
-});
+      const decoded = decodeEventWithAbi(rawEvent, tokenAbi);
 
-describe('ExplorerApiClient.iterateEvents (#1080)', () => {
-  const originalFetch = global.fetch;
-
-  afterEach(() => {
-    global.fetch = originalFetch;
-  });
-
-  function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json', ...headers },
+      expect(decoded.function).toBe('transfer');
+      expect(decoded.abi_match).toBe(true);
+      expect(decoded.function_abi?.name).toBe('transfer');
+      expect(decoded.args).toEqual({
+        from: 'G_SENDER',
+        to: 'G_RECEIVER',
+        amount: '1000000',
+      });
     });
-  }
 
-  it('paginates through /api/events with the real client', async () => {
-    const client = new ExplorerApiClient({ baseUrl: 'http://test.local' });
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ data: [{ seq: 9 }, { seq: 8 }], next_cursor: '8' }))
-      .mockResolvedValueOnce(jsonResponse({ data: [{ seq: 7 }], next_cursor: null }));
-    global.fetch = fetchMock as unknown as typeof fetch;
+    it('retains raw XDR access and raw event fields intact', () => {
+      const rawEvent: RawEvent = {
+        contract_id: 'C123',
+        raw_topics: ['transfer', 'G1', 'G2'],
+        raw_data: '500',
+        raw_xdr: 'RAW_XDR_STRING_PAYLOAD',
+        event_xdr: 'EVENT_XDR_BYTES_PAYLOAD',
+        ledger: 999,
+        tx_hash: '0xhash',
+      };
 
-    const seqs: number[] = [];
-    for await (const ev of client.iterateEvents({ limit: 2 })) {
-      seqs.push((ev as unknown as { seq: number }).seq);
-    }
-    expect(seqs).toEqual([9, 8, 7]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const secondUrl = fetchMock.mock.calls[1][0] as string;
-    expect(secondUrl).toContain('after_seq=8');
-    expect(secondUrl).toContain('limit=2');
+      const decoded = decodeEventWithAbi(rawEvent, tokenAbi);
+
+      // Raw XDR access MUST be preserved
+      expect(decoded.raw_xdr).toBe('RAW_XDR_STRING_PAYLOAD');
+      expect(decoded.event_xdr).toBe('EVENT_XDR_BYTES_PAYLOAD');
+      expect(decoded.raw_topics).toEqual(['transfer', 'G1', 'G2']);
+      expect(decoded.raw_data).toBe('500');
+      expect(decoded.ledger).toBe(999);
+      expect(decoded.tx_hash).toBe('0xhash');
+    });
+
+    it('retains unknown and future fields on the event', () => {
+      const rawEvent: RawEvent = {
+        contract_id: 'C123',
+        function: 'transfer',
+        raw_topics: ['transfer', 'G1', 'G2'],
+        raw_data: '100',
+        custom_metadata: { indexer_version: '2.5', partition: 4 },
+        future_protocol_field: true,
+        trace_id: 'trace-xyz-789',
+      };
+
+      const decoded = decodeEventWithAbi(rawEvent, tokenAbi);
+
+      // Unknown fields must be preserved on decoded output
+      expect(decoded['custom_metadata']).toEqual({ indexer_version: '2.5', partition: 4 });
+      expect(decoded['future_protocol_field']).toBe(true);
+      expect(decoded['trace_id']).toBe('trace-xyz-789');
+    });
+
+    it('retains excess / unknown positional parameters', () => {
+      const rawEvent: RawEvent = {
+        function: 'mint',
+        // mint ABI expects 2 params (to, amount), but 4 values are provided
+        raw_topics: ['mint', 'G_RECIPIENT', '500', 'extra_arg_1', 'extra_arg_2'],
+      };
+
+      const decoded = decodeEventWithAbi(rawEvent, tokenAbi);
+
+      expect(decoded.abi_match).toBe(true);
+      expect(decoded.args.to).toBe('G_RECIPIENT');
+      expect(decoded.args.amount).toBe('500');
+      expect((decoded.args as any)._unknown_params).toEqual(['extra_arg_1', 'extra_arg_2']);
+    });
+
+    it('handles unknown functions not defined in the ABI gracefully', () => {
+      const rawEvent: RawEvent = {
+        contract_id: 'C123',
+        function: 'unregistered_function',
+        raw_topics: ['unregistered_function', 'val1', 'val2'],
+        raw_data: 'val3',
+        raw_xdr: 'RAWXDR_UNKNOWN',
+        custom_flag: 42,
+      };
+
+      const decoded = decodeEventWithAbi(rawEvent, tokenAbi);
+
+      expect(decoded.function).toBe('unregistered_function');
+      expect(decoded.abi_match).toBe(false);
+      expect(decoded.function_abi).toBeUndefined();
+      expect((decoded.args as any)._positional).toEqual(['val1', 'val2', 'val3']);
+      expect(decoded.raw_xdr).toBe('RAWXDR_UNKNOWN');
+      expect(decoded['custom_flag']).toBe(42);
+    });
+
+    it('handles raw_data formatted as JSON array', () => {
+      const rawEvent: RawEvent = {
+        function: 'transfer',
+        raw_topics: ['transfer', 'G_FROM'],
+        raw_data: JSON.stringify(['G_TO', '2500']),
+      };
+
+      const decoded = decodeEventWithAbi(rawEvent, tokenAbi);
+
+      expect(decoded.args).toEqual({
+        from: 'G_FROM',
+        to: 'G_TO',
+        amount: '2500',
+      });
+    });
+
+    it('throws TypeError if event is not an object', () => {
+      expect(() => decodeEventWithAbi(null as any, tokenAbi)).toThrow(TypeError);
+      expect(() => decodeEventWithAbi(undefined as any, tokenAbi)).toThrow(TypeError);
+    });
   });
 
-  it('surfaces API errors from within the iterator', async () => {
-    const client = new ExplorerApiClient({ baseUrl: 'http://test.local' });
-    global.fetch = vi
-      .fn()
-      .mockResolvedValue(jsonResponse({ error: 'Invalid limit' }, 422)) as unknown as typeof fetch;
+  describe('createEventDecoder', () => {
+    it('creates a reusable decoder instance with lookup methods', () => {
+      const decoder = createEventDecoder(tokenAbi);
 
-    await expect(collectEvents(client.iterateEvents({ limit: 0 }))).rejects.toThrow(ApiError);
+      expect(decoder.supportedFunctions).toEqual(['transfer', 'mint', 'balance']);
+      expect(decoder.hasFunction('transfer')).toBe(true);
+      expect(decoder.hasFunction('MINT')).toBe(true);
+      expect(decoder.hasFunction('nonexistent')).toBe(false);
+
+      const fnAbi = decoder.getFunctionAbi('transfer');
+      expect(fnAbi?.params.length).toBe(3);
+
+      const decoded = decoder.decode({
+        function: 'mint',
+        raw_topics: ['mint', 'G_ADDR'],
+        raw_data: '1000',
+      });
+
+      expect(decoded.args.to).toBe('G_ADDR');
+      expect(decoded.args.amount).toBe('1000');
+    });
+
+    it('works with FunctionAbi[] array directly', () => {
+      const decoder = createEventDecoder(tokenAbi.functions);
+      expect(decoder.supportedFunctions).toContain('transfer');
+      expect(decoder.hasFunction('transfer')).toBe(true);
+    });
+  });
+
+  describe('generateEventTypes', () => {
+    it('generates TypeScript definitions with raw XDR access and open index signatures', () => {
+      const tsCode = generateEventTypes(tokenAbi);
+
+      // Contains namespace
+      expect(tsCode).toContain('export namespace ExampleTokenEvents');
+
+      // Contains transfer args interface
+      expect(tsCode).toContain('export interface TransferArgs');
+      expect(tsCode).toContain('from: string;');
+      expect(tsCode).toContain('to: string;');
+      expect(tsCode).toContain('amount: string | bigint | number;');
+      expect(tsCode).toContain('[key: string]: unknown;');
+
+      // Contains TransferEvent interface with raw XDR fields
+      expect(tsCode).toContain('export interface TransferEvent');
+      expect(tsCode).toContain("function: 'transfer';");
+      expect(tsCode).toContain('raw_topics?: (string | unknown)[];');
+      expect(tsCode).toContain('raw_data?: string | unknown;');
+      expect(tsCode).toContain('raw_xdr?: string;');
+      expect(tsCode).toContain('event_xdr?: string;');
+      expect(tsCode).toContain('[key: string]: unknown;');
+
+      // Contains EventMap
+      expect(tsCode).toContain('export interface EventMap');
+      expect(tsCode).toContain("'transfer': TransferArgs;");
+      expect(tsCode).toContain("'mint': MintArgs;");
+    });
+
+    it('allows custom typeName option', () => {
+      const tsCode = generateEventTypes(tokenAbi, { typeName: 'MyCustomToken' });
+      expect(tsCode).toContain('export namespace MyCustomToken');
+    });
   });
 });
