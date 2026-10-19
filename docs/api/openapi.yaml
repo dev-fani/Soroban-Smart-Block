@@ -690,6 +690,202 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/contracts/{id}/decode-coverage:
+    get:
+      summary: Per-function decode coverage over a ledger range (Issue #1058)
+      description: |
+        Reports, for each function the contract emitted in the inclusive ledger
+        range, how many events were decoded against an ABI or on-chain spec
+        (decode_status `verified` or `unverified`). Events decoded only by
+        heuristic guessing are not counted as decoded. `decode_share` is a ratio
+        between 0 and 1, rounded to four decimals, or null when there are no events.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+        - name: from_ledger
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: First ledger of the range (inclusive)
+        - name: to_ledger
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: Last ledger of the range (inclusive). Must be >= from_ledger.
+      responses:
+        "200":
+          description: Decode coverage for the range
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, from_ledger, to_ledger, total, decoded, decode_share, functions]
+                properties:
+                  contract_id:
+                    type: string
+                  from_ledger:
+                    type: integer
+                  to_ledger:
+                    type: integer
+                  total:
+                    type: integer
+                  decoded:
+                    type: integer
+                  decode_share:
+                    type: number
+                    nullable: true
+                  functions:
+                    type: array
+                    items:
+                      type: object
+                      required: [function, total, decoded, decode_share]
+                      properties:
+                        function:
+                          type: string
+                        total:
+                          type: integer
+                        decoded:
+                          type: integer
+                        decode_share:
+                          type: number
+                          nullable: true
+              example:
+                contract_id: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+                from_ledger: 1000
+                to_ledger: 2000
+                total: 7
+                decoded: 6
+                decode_share: 0.8571
+                functions:
+                  - function: transfer
+                    total: 3
+                    decoded: 2
+                    decode_share: 0.6667
+                  - function: mint
+                    total: 4
+                    decoded: 4
+                    decode_share: 1
+        "400":
+          description: from_ledger or to_ledger is missing, not a positive integer, or from_ledger > to_ledger
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/metadata-corrections:
+    get:
+      summary: Public metadata correction history (Issue #1059)
+      description: |
+        Lists corrections made to a contract's live name or description, newest
+        first. Each entry records the previous value, the new value, the reason and
+        the API key that made the change. Prior contract_versions snapshots are
+        never rewritten.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      responses:
+        "200":
+          description: Corrections for the contract (empty array when none)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, corrections]
+                properties:
+                  contract_id:
+                    type: string
+                  corrections:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MetadataCorrection"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Correct a contract's name or description (Issue #1059)
+      description: |
+        Updates the live field and appends a correction record in one atomic
+        statement. The actor is taken from the authenticated API key and cannot be
+        supplied in the body.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Contract ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [field, new_value, reason]
+              properties:
+                field:
+                  type: string
+                  enum: [name, description]
+                new_value:
+                  type: string
+                  description: Max 200 characters for name, 2000 for description
+                reason:
+                  type: string
+                  maxLength: 500
+            example:
+              field: name
+              new_value: Soroban Token
+              reason: Corrects a typo in the registered name
+      responses:
+        "201":
+          description: Correction recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetadataCorrection"
+        "400":
+          description: Invalid field, value or reason
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid API key
+        "404":
+          description: Contract not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/admin/abi/import-github:
     post:
       summary: Bulk ABI import from a GitHub repository (Issue #520)
@@ -985,6 +1181,283 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/compare:
+    get:
+      summary: Compare activity between two public accounts
+      description: >-
+        Summarises each account's indexed events over an optional date interval
+        and lists the contracts both accounts touched. `fields_used` discloses
+        the event columns the figures were derived from. Empty accounts return
+        zeroed summaries.
+      parameters:
+        - name: a
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: b
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Side-by-side activity summary
+          content:
+            application/json:
+              example:
+                interval: { from: "2026-01-01", to: "2026-01-31" }
+                accounts:
+                  - address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    event_count: 2
+                    contract_count: 1
+                    contract_ids: ["CABC"]
+                    function_counts: { transfer: 2 }
+                    first_ledger: 10
+                    last_ledger: 20
+                  - address: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    event_count: 0
+                    contract_count: 0
+                    contract_ids: []
+                    function_counts: {}
+                    first_ledger: null
+                    last_ledger: null
+                shared_contract_ids: []
+                fields_used: [contract_id, function, ledger, created_at]
+        "400":
+          description: Malformed address, identical addresses, or invalid interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/{address}/counterparties:
+    get:
+      summary: Most-interacted contracts and counterparties for a wallet
+      description: >-
+        Ranks the contracts and counterparty addresses (G... or C...) that a
+        public account's events reference, by event count. Each entry includes
+        tx_hashes and event_seqs (capped at 10) to drill down to source
+        transactions and events. Counterparties come from a textual scan of
+        event topics and data, so they can include referenced-only addresses.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        "200":
+          description: Ranked contracts and counterparties
+          content:
+            application/json:
+              example:
+                address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                interval: { from: null, to: null }
+                contracts:
+                  - contract_id: "CABC"
+                    count: 2
+                    tx_hashes: ["hashA", "hashB"]
+                    event_seqs: [7, 9]
+                counterparties:
+                  - address: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    count: 1
+                    tx_hashes: ["hashA"]
+                    event_seqs: [7]
+        "400":
+          description: Malformed address, invalid interval, or invalid limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/workspace:
+    post:
+      summary: Summarise a private multi-account review selection
+      description: >-
+        Returns activity and counterparty summaries for 2-10 distinct public
+        accounts in one response. The server stores nothing: the selection is
+        kept in the browser, and the response is sent with Cache-Control:
+        no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [addresses]
+              properties:
+                addresses:
+                  type: array
+                  minItems: 2
+                  maxItems: 10
+                  items:
+                    type: string
+                    pattern: "^G[A-Z2-7]{55}$"
+                from:
+                  type: string
+                  format: date
+                to:
+                  type: string
+                  format: date
+      responses:
+        "200":
+          description: One summary per requested account, in request order
+          content:
+            application/json:
+              example:
+                interval: { from: null, to: null }
+                accounts:
+                  - address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    activity:
+                      event_count: 1
+                      contract_count: 1
+                      contract_ids: ["CABC"]
+                      function_counts: { transfer: 1 }
+                      first_ledger: 10
+                      last_ledger: 10
+                    contracts:
+                      - contract_id: "CABC"
+                        count: 1
+                        tx_hashes: ["hashA"]
+                        event_seqs: [7]
+                    counterparties: []
+                fields_used: [contract_id, function, ledger, created_at]
+        "400":
+          description: Non-array body, 1 or more than 10 accounts, invalid or duplicate addresses, or invalid interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/filter-presets/validate:
+    post:
+      summary: Validate an account activity filter preset
+      description: >-
+        Checks a preset's name, fn categories, and date interval, and returns
+        the normalised form. Stores nothing. Presets are saved in the browser.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 60 }
+                fn: { type: string, description: "Comma-separated categories, up to 10" }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+      responses:
+        "200":
+          description: Normalised preset
+          content:
+            application/json:
+              example:
+                preset: { name: "Monthly transfers", fn: "transfer", from: "2026-01-01", to: "2026-01-31" }
+        "422":
+          description: Every validation problem, in `errors`
+          content:
+            application/json:
+              example:
+                errors: ["name is required"]
+
+  /api/wallet/filter-presets/share:
+    post:
+      summary: Encode a filter preset as a share token
+      description: >-
+        Returns a self-contained, versioned, base64url token for a validated
+        preset. The token carries the preset itself; nothing is stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 60 }
+                fn: { type: string }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+      responses:
+        "200":
+          description: Share token
+          content:
+            application/json:
+              example:
+                token: "eyJ2IjoxLCJuYW1lIjoiVHJhbnNmZXJzIn0"
+        "422":
+          description: Invalid preset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/filter-presets/open:
+    post:
+      summary: Decode a filter preset share token
+      description: >-
+        Decodes a share token and re-validates the preset it contains, so a
+        hand-made token cannot skip the checks applied on save.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, maxLength: 2048 }
+      responses:
+        "200":
+          description: Decoded and validated preset
+          content:
+            application/json:
+              example:
+                preset: { name: "Transfers", fn: "transfer", from: null, to: null }
+        "422":
+          description: Malformed, unsupported, or invalid token
           content:
             application/json:
               schema:
@@ -2013,6 +2486,88 @@ paths:
                     example: true
         "400":
           description: Missing required field or invalid signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/tokens/{id}/concentration:
+    get:
+      summary: Holder concentration over the current balance snapshot (Issue #1061)
+      description: |
+        Returns the share of total supply held by the top N holders and the
+        Herfindahl-Hirschman index (HHI, 0..10000) computed from holder shares
+        rounded to basis points. Zero, negative and malformed balances are excluded
+        and counted in `invalid_balances`. The source is the current token_holders
+        snapshot only; no historical series is available, indicated by
+        `coverage.historical: false`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Token contract ID
+        - name: top
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+          description: Number of largest holders in the top-N window
+      responses:
+        "200":
+          description: Concentration metrics (shares are null when there are no positive balances)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_id, holder_count, total_balance_raw, top, top_share, hhi, invalid_balances, coverage]
+                properties:
+                  contract_id:
+                    type: string
+                  holder_count:
+                    type: integer
+                  total_balance_raw:
+                    type: string
+                  top:
+                    type: integer
+                  top_share:
+                    type: number
+                    nullable: true
+                  hhi:
+                    type: number
+                    nullable: true
+                  invalid_balances:
+                    type: integer
+                  coverage:
+                    type: object
+                    properties:
+                      source:
+                        type: string
+                      snapshot:
+                        type: string
+                      historical:
+                        type: boolean
+              example:
+                contract_id: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+                holder_count: 4
+                total_balance_raw: "100"
+                top: 2
+                top_share: 0.5
+                hhi: 2500
+                invalid_balances: 0
+                coverage: { source: token_holders, snapshot: current, historical: false }
+        "400":
+          description: top is not an integer between 1 and 100
           content:
             application/json:
               schema:
@@ -5850,6 +6405,30 @@ components:
           nullable: true
           example: null
 
+    MetadataCorrection:
+      type: object
+      required: [id, contract_id, field, new_value, reason, actor, created_at]
+      properties:
+        id:
+          type: integer
+        contract_id:
+          type: string
+        field:
+          type: string
+          enum: [name, description]
+        old_value:
+          type: string
+          nullable: true
+        new_value:
+          type: string
+        reason:
+          type: string
+        actor:
+          type: string
+          description: API key id that made the correction
+        created_at:
+          type: string
+          format: date-time
     AbiHistoryEntry:
       type: object
       required: [abi_version, functions, registered_by, min_ledger, created_at]
