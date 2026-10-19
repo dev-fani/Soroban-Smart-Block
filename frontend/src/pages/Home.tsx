@@ -1,9 +1,10 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import type { DecodedEvent } from "../api";
 import EventTable from "../components/EventTable";
+import { parseExplorerFilters, filterByLedgerRange } from "../utils/explorerFilters";
 import ExportButton from "../components/ExportButton";
 import SkeletonLoader from "../components/SkeletonLoader";
 import StatsBar from "../components/StatsBar";
@@ -118,7 +119,17 @@ export default function Home() {
       }),
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
   });
-  const events = eventsPages?.pages.flatMap((page) => page.data) ?? [];
+  // Ledger range from the URL (#1038). The events API has no ledger filter, so
+  // the range is applied to the events already loaded.
+  const { filters: shareFilters, errors: filterErrors } = useMemo(
+    () => parseExplorerFilters(searchParams),
+    [searchParams],
+  );
+  const events = filterByLedgerRange(
+    eventsPages?.pages.flatMap((page) => page.data) ?? [],
+    shareFilters.fromLedger,
+    shareFilters.toLedger,
+  );
 
   // invalidate the event list when a live event arrives on the first page
   const handleLiveEvent = useCallback(

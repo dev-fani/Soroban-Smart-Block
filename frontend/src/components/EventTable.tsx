@@ -4,6 +4,13 @@ import { useQueries } from "@tanstack/react-query";
 import { api } from "../api";
 import type { ContractMeta, DecodedEvent } from "../api";
 import { useVirtualList } from "../hooks/useVirtualList";
+import EventColumnSettings from "./EventColumnSettings";
+import {
+  EVENT_COLUMN_LABELS,
+  loadEventColumns,
+  saveEventColumns,
+  type EventColumnId,
+} from "../utils/eventColumns";
 import FiatValue from "./FiatValue";
 import AssetLogo from "./AssetLogo";
 import CopyableAddress from "./CopyableAddress";
@@ -330,7 +337,44 @@ const EventRow = memo(function EventRow({
               </span>
             ) : null;
           })()}
+    </td>
+  );
+});
+
+/** One event row. Cells render in the configured column order (#1039). */
+const EventRow = memo(function EventRow({
+  ev,
+  contractMeta,
+  columns,
+}: {
+  ev: DecodedEvent;
+  contractMeta?: ContractMeta;
+  columns: EventColumnId[];
+}) {
+  const cells: Record<EventColumnId, React.ReactNode> = {
+    seq: (
+      <td style={td}>
+        <Link to={`/event/${ev.seq}`}>#{ev.seq}</Link>
       </td>
+    ),
+    ledger: <td style={td}>{ev.ledger.toLocaleString()}</td>,
+    contract: (
+      <td style={td}>
+        <ContractCell contractId={ev.contract_id} meta={contractMeta} />
+      </td>
+    ),
+    function: (
+      <td style={td}>
+        <FunctionBadge fn={ev.function} />
+      </td>
+    ),
+    description: <DescriptionCell ev={ev} />,
+  };
+  return (
+    <>
+      {columns.map((id) => (
+        <Fragment key={id}>{cells[id]}</Fragment>
+      ))}
     </>
   );
 });
@@ -395,11 +439,11 @@ export default function EventTable({ events, onReachEnd, scrollKey, density = "c
               color: "var(--muted)",
             }}
           >
-            <th style={th}>Seq</th>
-            <th style={th}>Ledger</th>
-            <th style={th}>Contract</th>
-            <th style={th}>Function</th>
-            <th style={th}>Description</th>
+            {columns.map((id) => (
+              <th key={id} style={th}>
+                {EVENT_COLUMN_LABELS[id]}
+              </th>
+            ))}
           </tr>
         </thead>
       </table>
