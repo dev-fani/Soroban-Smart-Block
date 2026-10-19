@@ -26,6 +26,10 @@ from `indexer/openapi.yaml`). Try endpoints live in the
   and re-validate a token. Presets are saved in the browser; the server stores
   none (#1049).
 - This changelog and a generated OpenAPI 3.1 JSON document for tooling.
+- `GET /api/tokens/{contractId}/nfts/analytics` and `GET /api/contracts/{id}/stats` support optional `as_of_ledger` parameter for point-in-time historical analytics, returning `as_of_ledger` and `watermark` metadata (#1070).
+- `GET /api/events/{seq}/decode-provenance` and `decode_provenance` fields (`decoder`, `decoder_version`, `abi_version`, `decode_status`) added to decoded event REST responses (#1071).
+- `GET /api/tx/{hash}/events` and `GET /api/transactions/{hash}/events` for bounded transaction events with deterministic `seq` ordering (#1072).
+- `GET /api/contracts/{id}/activity-summary` for bounded per-contract event activity aggregated by function and interval (hour/day/week) with partial data indicators (#1073).
 - `GET /api/contracts/{id}/stats` — event/caller counts and a daily activity
   series for a contract, cached for 5 minutes. Accepts an optional `range`
   query parameter (1-365 days, default 30) for the historical 30/90/365-day

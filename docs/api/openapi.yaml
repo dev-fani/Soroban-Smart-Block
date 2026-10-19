@@ -76,6 +76,50 @@ paths:
           description: Transaction record
           content: { application/json: { schema: { $ref: '#/components/schemas/Transaction' } } }
         '404': { description: Transaction not found }
+  /api/tx/{hash}/events:
+    get:
+      summary: Get all indexed events for a transaction with stable ordering
+      description: Returns all indexed transaction events in deterministic order with bounded response size.
+      parameters:
+        - in: path
+          name: hash
+          required: true
+          schema: { type: string }
+          description: Transaction hash
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+          description: Maximum number of events to return (bounded 1..200)
+        - in: query
+          name: offset
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+          description: Number of events to skip
+        - in: query
+          name: order
+          required: false
+          schema: { type: string, enum: [asc, desc], default: asc }
+          description: Sorting direction for deterministic ordering
+      responses:
+        '200':
+          description: Deterministically ordered transaction events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionEventsResponse'
+        '422':
+          description: Invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/accounts/{id}/transactions:
     get:
       summary: List transactions sent or fee-paid by an account
@@ -751,6 +795,14 @@ paths:
           description: >-
             Number of trailing days to include in the events_per_day series
             (1-365, default 30). The UI uses 30, 90, and 365-day presets.
+        - name: as_of_ledger
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            example: 1050000
+          description: Upper ledger sequence watermark to bound the stats query
       responses:
         "200":
           description: Contract statistics
@@ -782,6 +834,59 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/{id}/activity-summary:
+    get:
+      summary: Contract activity summary
+      description: Provide bounded per-contract event counts by function and interval with partial-data indicators (#1073).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+          description: Contract ID
+        - name: interval
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [hour, day, week]
+            default: day
+          description: Time bucket granularity
+        - name: range
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Number of intervals to include (hour 1..168, day 1..90, week 1..52)
+        - name: as_of_ledger
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+          description: Upper ledger sequence watermark to bound the activity summary
+      responses:
+        "200":
+          description: Activity summary breakdown with partial-data indicators
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractActivitySummaryResponse"
+        "422":
+          description: Invalid input parameters
           content:
             application/json:
               schema:
@@ -1901,6 +2006,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/events/{seq}/decode-provenance:
+    get:
+      summary: Event decode provenance
+      description: Returns decoder and ABI version identifiers plus decode status in a backward-compatible response (#1071).
+      parameters:
+        - name: seq
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 15
+      responses:
+        "200":
+          description: Decode provenance details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventDecodeProvenanceResponse"
+        "404":
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid event sequence number
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transactions/status:
     get:
       summary: SSE stream for multiple transaction statuses
@@ -2890,6 +3032,14 @@ paths:
             minimum: 1
             maximum: 365
           description: Rolling window length in days (clamped server-side to 7..365)
+        - name: as_of_ledger
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            example: 1050
+          description: Upper ledger sequence watermark to bound the analytics query
       responses:
         "200":
           description: Collection analytics
@@ -6392,6 +6542,16 @@ components:
           type: string
         days:
           type: integer
+        as_of_ledger:
+          type: integer
+          nullable: true
+          example: 1050
+          description: Upper ledger sequence watermark requested to bound the query
+        watermark:
+          type: integer
+          nullable: true
+          example: 1048
+          description: Actual highest indexed ledger watermark present in the returned dataset
         totals:
           type: object
           required: [minted, transfers, unique_holders]
@@ -6773,13 +6933,47 @@ components:
             swap events where min_amount_out is known.
         decode_status:
           type: string
-          enum: [verified, unverified, heuristic]
           description: Trust level assigned by ABI shape validation.
+          example: "verified"
         decode_warnings:
           type: array
           items:
             type: string
           description: Machine-readable reasons the ABI validation gate did not pass.
+        decoder:
+          type: string
+          nullable: true
+          example: "native-sac"
+          description: Identifier of the decoder that processed the event
+        decoder_version:
+          type: string
+          nullable: true
+          example: "1.0.0"
+          description: Version of the decoder that processed the event
+        abi_version:
+          type: integer
+          nullable: true
+          example: 0
+          description: ABI version identifier used during decode
+        decode_provenance:
+          type: object
+          description: Detailed decoder and ABI provenance information
+          properties:
+            decoder:
+              type: string
+              nullable: true
+              example: "native-sac"
+            decoder_version:
+              type: string
+              nullable: true
+              example: "1.0.0"
+            abi_version:
+              type: integer
+              nullable: true
+              example: 0
+            decode_status:
+              type: string
+              example: "verified"
 
     KeysetPageInfo:
       type: object
@@ -7108,6 +7302,16 @@ components:
           type: integer
           description: The number of trailing days requested via the range query parameter
           example: 90
+        as_of_ledger:
+          type: integer
+          nullable: true
+          description: Upper ledger sequence watermark requested to bound the query
+          example: 1050000
+        watermark:
+          type: integer
+          nullable: true
+          description: Actual latest indexed ledger watermark included in the dataset
+          example: 1050320
         events_per_day:
           type: array
           items:
@@ -7159,6 +7363,158 @@ components:
           type: string
           nullable: true
           example: "centre.io"
+
+    EventDecodeProvenanceResponse:
+      type: object
+      required: [seq, decode_provenance]
+      properties:
+        seq:
+          type: integer
+          example: 15
+        event_id:
+          type: string
+          nullable: true
+          example: "0000000001050-0000000015"
+        contract_id:
+          type: string
+          nullable: true
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        decoder:
+          type: string
+          nullable: true
+          example: "native-sac"
+        decoder_version:
+          type: string
+          nullable: true
+          example: "1.0.0"
+        abi_version:
+          type: integer
+          nullable: true
+          example: 0
+        decode_status:
+          type: string
+          example: "verified"
+        decode_provenance:
+          type: object
+          properties:
+            decoder:
+              type: string
+              nullable: true
+            decoder_version:
+              type: string
+              nullable: true
+            abi_version:
+              type: integer
+              nullable: true
+            decode_status:
+              type: string
+
+    TransactionEventsResponse:
+      type: object
+      required: [tx_hash, events, total, limit, offset]
+      properties:
+        tx_hash:
+          type: string
+          example: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecodedEvent"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecodedEvent"
+        total:
+          type: integer
+          example: 3
+        limit:
+          type: integer
+          example: 50
+        offset:
+          type: integer
+          example: 0
+
+    ContractActivitySummaryResponse:
+      type: object
+      required: [contract_id, interval, range, total_events, by_function, intervals, partial_data, partial_indicators]
+      properties:
+        contract_id:
+          type: string
+          example: "CC4VM2DTTR4QO4J4E5K2YUXM"
+        interval:
+          type: string
+          enum: [hour, day, week]
+          example: "day"
+        range:
+          type: integer
+          example: 30
+        as_of_ledger:
+          type: integer
+          nullable: true
+          example: 1050000
+        watermark:
+          type: integer
+          nullable: true
+          example: 1050320
+        total_events:
+          type: integer
+          example: 250
+        by_function:
+          type: array
+          items:
+            type: object
+            required: [function, count]
+            properties:
+              function:
+                type: string
+                example: "transfer"
+              count:
+                type: integer
+                example: 180
+        intervals:
+          type: array
+          items:
+            type: object
+            required: [start, end, count, functions, is_partial]
+            properties:
+              start:
+                type: string
+                format: date-time
+                example: "2026-10-01T00:00:00.000Z"
+              end:
+                type: string
+                format: date-time
+                example: "2026-10-02T00:00:00.000Z"
+              count:
+                type: integer
+                example: 15
+              functions:
+                type: object
+                additionalProperties:
+                  type: integer
+                example: { "transfer": 10, "mint": 5 }
+              is_partial:
+                type: boolean
+                example: false
+        partial_data:
+          type: boolean
+          example: false
+        partial_indicators:
+          type: object
+          required: [as_of_ledger_bounded, incomplete_history, active_interval_incomplete, truncated_functions]
+          properties:
+            as_of_ledger_bounded:
+              type: boolean
+              example: false
+            incomplete_history:
+              type: boolean
+              example: false
+            active_interval_incomplete:
+              type: boolean
+              example: true
+            truncated_functions:
+              type: boolean
+              example: false
 
   headers:
     X-RateLimit-Limit:

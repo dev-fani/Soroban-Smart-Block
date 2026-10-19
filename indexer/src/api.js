@@ -1867,6 +1867,38 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/events/:seq/decode-provenance — event decode provenance (#1071).
+  app.get("/api/events/:seq/decode-provenance", async (req, res) => {
+    try {
+      const seq = Number(req.params.seq);
+      if (!Number.isSafeInteger(seq) || seq < 1) {
+        return res.status(422).json({ error: "Invalid event id" });
+      }
+      const ev = await db.getEvent(seq);
+      if (!ev) {
+        return res.status(404).json({ error: `Event ${seq} not found` });
+      }
+      const provenance = ev.decode_provenance || {
+        decoder: ev.decoder ?? null,
+        decoder_version: ev.decoder_version ?? null,
+        abi_version: ev.abi_version ?? null,
+        decode_status: ev.decode_status || "unverified",
+      };
+      res.json({
+        seq: Number(ev.seq),
+        event_id: ev.event_id ?? null,
+        contract_id: ev.contract_id ?? null,
+        decode_provenance: provenance,
+        decoder: provenance.decoder,
+        decoder_version: provenance.decoder_version,
+        abi_version: provenance.abi_version,
+        decode_status: provenance.decode_status,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // GET /api/events/:seq/zk-costs
   // Returns the ZK host function call list and cost delta for a single event.
   app.get("/api/events/:seq/zk-costs", async (req, res) => {
@@ -1940,6 +1972,47 @@ export function createApi({ logDestination, dbOverride } = {}) {
       res.json(transaction);
     } catch (error) { res.status(500).json({ error: error.message }); }
   });
+
+  // GET /api/tx/:hash/events — all transaction events in deterministic order with bounded size (#1072).
+  const txEventsHandler = async (req, res) => {
+    try {
+      const hash = req.params.hash;
+      if (!hash || typeof hash !== "string" || !/^[0-9a-fA-F]{1,64}$/.test(hash.trim())) {
+        return res.status(422).json({ error: "Invalid transaction hash" });
+      }
+      const cleanHash = hash.trim();
+
+      if (req.query.limit !== undefined) {
+        const parsedLimit = Number(req.query.limit);
+        if (isNaN(parsedLimit) || parsedLimit <= 0 || parsedLimit > 200 || !Number.isInteger(parsedLimit)) {
+          return res.status(422).json({ error: "Invalid limit" });
+        }
+      }
+      if (req.query.offset !== undefined) {
+        const parsedOffset = Number(req.query.offset);
+        if (isNaN(parsedOffset) || parsedOffset < 0 || !Number.isInteger(parsedOffset)) {
+          return res.status(422).json({ error: "Invalid offset" });
+        }
+      }
+      if (req.query.order !== undefined) {
+        const ord = String(req.query.order).toLowerCase();
+        if (!["asc", "desc"].includes(ord)) {
+          return res.status(422).json({ error: "Invalid order" });
+        }
+      }
+
+      const limit = req.query.limit !== undefined ? Number(req.query.limit) : 50;
+      const offset = req.query.offset !== undefined ? Number(req.query.offset) : 0;
+      const order = req.query.order || "asc";
+
+      const result = await db.getTransactionEvents(cleanHash, { limit, offset, order });
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  };
+  app.get("/api/tx/:hash/events", txEventsHandler);
+  app.get("/api/transactions/:hash/events", txEventsHandler);
 
   app.get("/api/accounts/:id/transactions", async (req, res) => {
     try { res.json(await db.getAccountTransactions(req.params.id, req.query.limit)); }
@@ -3273,6 +3346,7 @@ export function createApi({ logDestination, dbOverride } = {}) {
   //   Collection-level analytics (issue #810): mint volume over time and a
   //   unique-holder-count trend, derived from indexed NFT mint/transfer events.
   //   ?days=<n> — rolling window length, default 30, clamped 7..365.
+  //   ?as_of_ledger=<n> — upper ledger sequence bound (#1070).
   // Older clients still call /api/tokens/:contractId/analytics — accept that
   // alias while keeping the canonical /nfts/analytics route.
   const nftAnalyticsHandler = async (req, res) => {
@@ -3282,7 +3356,15 @@ export function createApi({ logDestination, dbOverride } = {}) {
       if (isNaN(days) || days < 1 || days > 365) {
         return res.status(422).json({ error: "Invalid days" });
       }
-      const analytics = await db.getNftCollectionAnalytics(contractId, days);
+      const asOfLedgerRaw = req.query.as_of_ledger ?? req.query["as-of-ledger"];
+      let asOfLedger = null;
+      if (asOfLedgerRaw !== undefined) {
+        asOfLedger = Number(asOfLedgerRaw);
+        if (!Number.isInteger(asOfLedger) || asOfLedger < 0) {
+          return res.status(422).json({ error: "Invalid as_of_ledger" });
+        }
+      }
+      const analytics = await db.getNftCollectionAnalytics(contractId, days, asOfLedger);
       res.json(analytics);
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -3854,11 +3936,11 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
   // ── Contract Stats ────────────────────────────────────────────
 
-  // GET /api/contracts/:id/stats?range=30|90|365 — event/caller counts + a
+  // GET /api/contracts/:id/stats?range=30|90|365&as_of_ledger=<n> — event/caller counts + a
   // daily event-volume series over the trailing `range` days (default 30,
   // max 365), oldest first and zero-filled. Backs the contract detail page's
   // stats widget and the selectable-time-range invocation frequency chart
-  // (#799). The series is computed by db.getContractEventsByDay, which uses
+  // (#799, #1070). The series is computed by db.getContractEventsByDay, which uses
   // idx_events_contract_created (migration 028) for the long-range scan.
   app.get(
     "/api/contracts/:id/stats",
@@ -3871,22 +3953,88 @@ export function createApi({ logDestination, dbOverride } = {}) {
           return res.status(422).json({ error: "Invalid range" });
         }
       }
+      const asOfLedgerRaw = req.query.as_of_ledger ?? req.query["as-of-ledger"];
+      if (asOfLedgerRaw !== undefined) {
+        const parsedAsOf = Number(asOfLedgerRaw);
+        if (!Number.isInteger(parsedAsOf) || parsedAsOf < 0) {
+          return res.status(422).json({ error: "Invalid as_of_ledger" });
+        }
+      }
       next();
     },
-    makeCache("stats", (req) => `contracts:stats:${req.params.id}:${req.query.range ?? 30}`),
+    makeCache("stats", (req) => `contracts:stats:${req.params.id}:${req.query.range ?? 30}:${req.query.as_of_ledger ?? req.query["as-of-ledger"] ?? ""}`),
     async (req, res) => {
       try {
         const range = req.query.range !== undefined ? Number(req.query.range) : 30;
+        const asOfLedgerRaw = req.query.as_of_ledger ?? req.query["as-of-ledger"];
+        const asOfLedger = asOfLedgerRaw !== undefined ? Number(asOfLedgerRaw) : null;
         const [stats, eventsPerDay] = await Promise.all([
-          db.getContractStats(req.params.id),
-          db.getContractEventsByDay(req.params.id, range),
+          db.getContractStats(req.params.id, asOfLedger),
+          db.getContractEventsByDay(req.params.id, range, asOfLedger),
         ]);
-        res.json({ ...stats, events_per_day: eventsPerDay, range });
+        res.json({
+          ...stats,
+          as_of_ledger: asOfLedger,
+          watermark: stats.last_seen_ledger,
+          events_per_day: eventsPerDay,
+          range,
+        });
       } catch (e) {
         res.status(500).json({ error: e.message });
       }
     },
   );
+
+  // GET /api/contracts/:id/activity-summary — bounded event counts by function & interval (#1073)
+  const contractActivitySummaryHandler = async (req, res) => {
+    try {
+      const { id: contractId } = req.params;
+      if (!contractId || typeof contractId !== "string" || contractId.trim().length === 0) {
+        return res.status(422).json({ error: "Invalid contract ID" });
+      }
+
+      const interval = req.query.interval !== undefined ? String(req.query.interval).toLowerCase() : "day";
+      if (!["hour", "day", "week"].includes(interval)) {
+        return res.status(422).json({ error: "Invalid interval. Must be one of: hour, day, week" });
+      }
+
+      const limits = {
+        hour: { min: 1, max: 168 },
+        day: { min: 1, max: 90 },
+        week: { min: 1, max: 52 },
+      };
+
+      let range = undefined;
+      if (req.query.range !== undefined) {
+        range = Number(req.query.range);
+        if (!Number.isInteger(range) || range < limits[interval].min || range > limits[interval].max) {
+          return res.status(422).json({
+            error: `Invalid range for interval '${interval}'. Must be between ${limits[interval].min} and ${limits[interval].max}`,
+          });
+        }
+      }
+
+      const asOfLedgerRaw = req.query.as_of_ledger ?? req.query["as-of-ledger"];
+      let asOfLedger = null;
+      if (asOfLedgerRaw !== undefined) {
+        asOfLedger = Number(asOfLedgerRaw);
+        if (!Number.isInteger(asOfLedger) || asOfLedger < 0) {
+          return res.status(422).json({ error: "Invalid as_of_ledger" });
+        }
+      }
+
+      const summary = await db.getContractActivitySummary(contractId.trim(), {
+        interval,
+        range,
+        asOfLedger,
+      });
+      res.json(summary);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  };
+  app.get("/api/contracts/:id/activity-summary", contractActivitySummaryHandler);
+  app.get("/api/contracts/:id/activity", contractActivitySummaryHandler);
 
   // GET /api/contracts/:id/storage-tiers — write counts by storage durability tier
   app.get(
