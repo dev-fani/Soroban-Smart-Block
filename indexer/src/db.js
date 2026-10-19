@@ -1683,6 +1683,12 @@ export const db = {
     return rows[0] ?? null;
   },
 
+  async getContractsBulkMeta(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return [];
+    const { rows } = await pool.query("SELECT * FROM contracts WHERE id = ANY($1)", [ids]);
+    return rows;
+  },
+
   async listSandboxes({ cursor, after, before, page, limit = 25, offset, count } = {}) {
     const filterHash = hashFilters({});
     const safeLimit = Math.min(Math.max(1, Number(limit) || 25), 100);

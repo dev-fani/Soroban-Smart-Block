@@ -190,6 +190,46 @@ paths:
                   - $ref: "#/components/schemas/HealthStatus"
                   - $ref: "#/components/schemas/HealthErrorStatus"
 
+  /api/capabilities:
+    get:
+      summary: Capability-discovery endpoint
+      operationId: getCapabilities
+      security: []
+      description: |
+        Exposes supported networks, API versions, pagination modes, transports, and feature flags in a cacheable response.
+      parameters:
+        - name: network
+          in: query
+          required: false
+          description: Optional network name to filter capabilities for
+          schema:
+            type: string
+            enum: [testnet, mainnet, futurenet]
+      responses:
+        "200":
+          description: API capabilities summary
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Entity tag for conditional validation.
+            Cache-Control:
+              schema:
+                type: string
+              description: Caching directives.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiCapabilities"
+        "304":
+          description: Capabilities have not changed since previous request.
+        "400":
+          description: Invalid or unsupported network query parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/alerts:
     get:
       summary: List active alert conditions
@@ -578,6 +618,132 @@ paths:
                 type: string
         "422":
           description: Invalid cursor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/sql:
+    post:
+      summary: Execute curated analytics SQL query
+      operationId: executeSqlAnalyticsPost
+      description: |
+        Executes a read-only query against curated analytics views. Supports conditional requests via ETag and X-Ledger-Watermark headers.
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Entity tag validator for conditional requests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SqlAnalyticsRequest"
+      responses:
+        "200":
+          description: Analytics query results
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Entity tag based on query and ledger watermark
+            X-Ledger-Watermark:
+              schema:
+                type: string
+              description: Current indexed ledger watermark
+            Cache-Control:
+              schema:
+                type: string
+              description: Cache control directives
+          content:
+            application/json:
+              schema:
+                type: object
+            text/csv:
+              schema:
+                type: string
+        "304":
+          description: Results unchanged for current query and ledger watermark
+        "400":
+          description: Invalid query or disallowed SQL constructs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request payload exceeds size limit (1MB)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Analytics database not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: Execute curated analytics SQL query via GET
+      operationId: executeSqlAnalyticsGet
+      description: |
+        Executes a read-only query against curated analytics views. Supports conditional requests via ETag and X-Ledger-Watermark headers.
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Analytics SQL query to execute
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+          description: Response format
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Entity tag validator for conditional requests
+      responses:
+        "200":
+          description: Analytics query results
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Entity tag based on query and ledger watermark
+            X-Ledger-Watermark:
+              schema:
+                type: string
+              description: Current indexed ledger watermark
+            Cache-Control:
+              schema:
+                type: string
+              description: Cache control directives
+          content:
+            application/json:
+              schema:
+                type: object
+            text/csv:
+              schema:
+                type: string
+        "304":
+          description: Results unchanged for current query and ledger watermark
+        "400":
+          description: Invalid query or disallowed SQL constructs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Analytics database not configured
           content:
             application/json:
               schema:
@@ -1247,6 +1413,62 @@ paths:
                 $ref: "#/components/schemas/AlertResolveResult"
         "401":
           description: Missing or invalid admin bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/contracts/bulk:
+    post:
+      summary: Bulk contract metadata lookup
+      operationId: getBulkContractMeta
+      description: |
+        Accepts a bounded list of contract IDs (up to 100) and returns per-item found or not-found metadata results.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkContractsRequest"
+      responses:
+        "200":
+          description: Bulk lookup results per contract ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkContractsResponse"
+        "400":
+          description: Invalid request payload or batch size exceeds limit (100)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload exceeds 1MB size limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: Bulk contract metadata lookup via query parameter
+      operationId: getBulkContractMetaGet
+      description: Returns contract metadata for a comma-separated list of contract IDs (up to 100).
+      parameters:
+        - name: ids
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated list of contract IDs (max 100)
+      responses:
+        "200":
+          description: Bulk lookup results per contract ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkContractsResponse"
+        "400":
+          description: Invalid request or batch size exceeds limit
           content:
             application/json:
               schema:
