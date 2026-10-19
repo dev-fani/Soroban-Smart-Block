@@ -181,19 +181,158 @@ paths:
       description: |
         Kubernetes-style readiness check. Returns 200 if the service can handle
         traffic (dependencies are healthy). Returns 503 if dependencies are down.
+        Supports query parameter `dependency` to check an individual dependency (#1119).
+      parameters:
+        - name: dependency
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [database, cache, rpc]
+          description: Check readiness for a single dependency
       responses:
         "200":
-          description: Service is ready to handle traffic
+          description: Service or dependency is ready to handle traffic
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadinessStatus"
+        "400":
+          description: Invalid dependency query parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "503":
-          description: Service is not ready (dependencies unhealthy)
+          description: Service or dependency is not ready
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadinessStatus"
+
+  /api/db/pool:
+    get:
+      summary: Database connection pool status and saturation metrics (#1116)
+      security: []
+      description: Returns active connections, idle connections, waiting clients, and pool saturation ratio.
+      responses:
+        "200":
+          description: Current pool metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolStatus"
+
+  /api/observability/latency:
+    get:
+      summary: Per-endpoint API latency distributions (#1117)
+      security: []
+      description: Returns low-cardinality route-family latency distributions distinguishing server from upstream latency.
+      parameters:
+        - name: route_family
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [events, contracts, tokens, transactions, wallets, rpc, health, system, admin, webhooks, other]
+          description: Filter distributions by route family
+      responses:
+        "200":
+          description: Latency distributions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LatencyDistributionsResponse"
+        "400":
+          description: Invalid route_family parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/operator/incidents:
+    get:
+      summary: Operator incident timeline (#1115)
+      security: []
+      description: Correlates deployments, provider changes, lag spikes, and recovery actions.
+      parameters:
+        - name: event_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [deployment, provider_change, lag_spike, recovery_action, alert_trigger, alert_resolve]
+        - name: severity
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [info, warning, critical]
+        - name: source
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of incident timeline events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorIncidentTimelineResponse"
+        "400":
+          description: Invalid filter parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Record an operator incident event (#1115)
+      security: []
+      description: Records a deployment, provider change, lag spike, or recovery action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorIncidentCreateRequest"
+      responses:
+        "201":
+          description: Incident event recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorIncidentEvent"
+        "400":
+          description: Invalid event payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/csrf-token:
     get:
@@ -5846,6 +5985,164 @@ components:
         dependencies:
           type: object
           description: Dependency health details (same as HealthStatus.dependencies)
+
+    PoolStatus:
+      type: object
+      required: [total, idle, active, waiting, max, saturation, avgWaitTimeMs]
+      properties:
+        total:
+          type: integer
+          example: 10
+        idle:
+          type: integer
+          example: 7
+        active:
+          type: integer
+          example: 3
+        waiting:
+          type: integer
+          example: 0
+        max:
+          type: integer
+          example: 10
+        saturation:
+          type: number
+          example: 0.3
+        avgWaitTimeMs:
+          type: number
+          example: 15
+        maxWaitTimeMs:
+          type: number
+          example: 45
+
+    LatencyDistributionBucket:
+      type: object
+      properties:
+        count:
+          type: integer
+          example: 120
+        avgMs:
+          type: number
+          nullable: true
+          example: 14.5
+        p50Ms:
+          type: number
+          nullable: true
+          example: 12.0
+        p90Ms:
+          type: number
+          nullable: true
+          example: 25.0
+        p99Ms:
+          type: number
+          nullable: true
+          example: 48.0
+        minMs:
+          type: number
+          nullable: true
+          example: 2.1
+        maxMs:
+          type: number
+          nullable: true
+          example: 65.0
+
+    LatencyFamilyStats:
+      type: object
+      properties:
+        count:
+          type: integer
+          example: 120
+        server:
+          $ref: "#/components/schemas/LatencyDistributionBucket"
+        upstream:
+          $ref: "#/components/schemas/LatencyDistributionBucket"
+        total:
+          $ref: "#/components/schemas/LatencyDistributionBucket"
+
+    LatencyDistributionsResponse:
+      type: object
+      required: [timestamp]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        route_family:
+          type: string
+          example: "events"
+        route_families:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/LatencyFamilyStats"
+
+    OperatorIncidentEvent:
+      type: object
+      required: [id, event_type, severity, source, summary, created_at]
+      properties:
+        id:
+          type: integer
+          example: 1
+        event_type:
+          type: string
+          enum: [deployment, provider_change, lag_spike, recovery_action, alert_trigger, alert_resolve]
+          example: "provider_change"
+        severity:
+          type: string
+          enum: [info, warning, critical]
+          example: "warning"
+        source:
+          type: string
+          example: "rpc"
+        summary:
+          type: string
+          example: "RPC node failed over to backup provider"
+        details:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00.000Z"
+
+    OperatorIncidentTimelineResponse:
+      type: object
+      required: [data, total, limit, offset]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperatorIncidentEvent"
+        total:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 50
+        offset:
+          type: integer
+          example: 0
+
+    OperatorIncidentCreateRequest:
+      type: object
+      required: [event_type, summary]
+      properties:
+        event_type:
+          type: string
+          enum: [deployment, provider_change, lag_spike, recovery_action, alert_trigger, alert_resolve]
+          example: "deployment"
+        severity:
+          type: string
+          enum: [info, warning, critical]
+          default: "info"
+          example: "info"
+        source:
+          type: string
+          default: "indexer"
+          example: "indexer"
+        summary:
+          type: string
+          example: "Deployed indexer v1.4.0"
+        details:
+          type: object
+          example: { "version": "v1.4.0" }
 
     ErrorResponse:
       type: object
