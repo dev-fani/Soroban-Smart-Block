@@ -13,6 +13,18 @@ from `indexer/openapi.yaml`). Try endpoints live in the
 
 ### Added
 
+- `GET /api/wallet/compare?a=&b=` — side-by-side activity summary for two public
+  accounts over an optional `from`/`to` interval, with shared contracts and the
+  event fields used (`fields_used`) disclosed (#1046).
+- `GET /api/wallet/{address}/counterparties` — most-interacted contracts and
+  counterparty addresses for a public account, each with `tx_hashes` and
+  `event_seqs` for drill-down. Supports `from`/`to` and `limit` (1-50) (#1047).
+- `POST /api/wallet/workspace` — summaries for 2-10 distinct public accounts in
+  one response. The server stores no selection; responses are `no-store` (#1048).
+- `POST /api/wallet/filter-presets/validate`, `/share`, and `/open` — validate an
+  account activity filter preset, encode it as a versioned share token, and decode
+  and re-validate a token. Presets are saved in the browser; the server stores
+  none (#1049).
 - This changelog and a generated OpenAPI 3.1 JSON document for tooling.
 - `GET /api/tokens/{contractId}/nfts/analytics` and `GET /api/contracts/{id}/stats` support optional `as_of_ledger` parameter for point-in-time historical analytics, returning `as_of_ledger` and `watermark` metadata (#1070).
 - `GET /api/events/{seq}/decode-provenance` and `decode_provenance` fields (`decoder`, `decoder_version`, `abi_version`, `decode_status`) added to decoded event REST responses (#1071).

@@ -6,53 +6,7 @@ import { getIndexerNetwork } from "./networkConfig.js";
 import { decodeCursor, hashFilters, formatPageResponse } from "./cursor.js";
 import config from "./config.js";
 import { encryptSecret } from "./secrets/index.js";
-import { parseDecoderTag } from "./decoderVersions.js";
-
-/** Extract decode provenance from an event row (#1071). */
-export function getEventDecodeProvenance(event) {
-  if (!event || typeof event !== "object") return null;
-
-  let decoder = null;
-  let decoderVersion = null;
-
-  if (event.decoder_version) {
-    const parsed = parseDecoderTag(event.decoder_version);
-    if (parsed) {
-      decoder = parsed.id;
-      decoderVersion = parsed.version;
-    } else {
-      decoder = String(event.decoder_version);
-      decoderVersion = null;
-    }
-  }
-
-  const abiVersion =
-    event.abi_version !== undefined && event.abi_version !== null
-      ? Number(event.abi_version)
-      : null;
-
-  const decodeStatus = event.decode_status || "unverified";
-
-  return {
-    decoder,
-    decoder_version: decoderVersion,
-    abi_version: abiVersion,
-    decode_status: decodeStatus,
-  };
-}
-
-/** Attach decode provenance to an event row in a backward-compatible manner (#1071). */
-export function attachDecodeProvenance(event) {
-  if (!event || typeof event !== "object") return event;
-  const provenance = getEventDecodeProvenance(event);
-  return {
-    ...event,
-    decoder: provenance ? provenance.decoder : null,
-    abi_version: provenance ? provenance.abi_version : null,
-    decode_status: provenance ? provenance.decode_status : "unverified",
-    decode_provenance: provenance,
-  };
-}
+import { requestContext } from "./logger.js";
 
 // Migration 031 made `daemon_state` and `ledger_hashes` network-scoped:
 // their primary keys are now (network, key) and (network, ledger). Every
@@ -71,6 +25,66 @@ const replicaPools = String(process.env.READ_REPLICA_DATABASE_URLS || process.en
   .split(",").map((url) => url.trim()).filter(Boolean).map((connectionString) => new pg.Pool({ connectionString }));
 const replicaState = replicaPools.map((pool, index) => ({ pool, index, healthy: true, lagMs: 0, lastCheck: 0, replayLsn: null }));
 let lastWriteLsn = null;
+
+let _poolWaitTimes = [];
+const POOL_STATS_WINDOW = 100;
+let _maxWaitTimeMs = 0;
+
+export function recordPoolAcquire(waitMs) {
+  const ms = Math.max(0, Number(waitMs) || 0);
+  _poolWaitTimes.push(ms);
+  if (_poolWaitTimes.length > POOL_STATS_WINDOW) _poolWaitTimes.shift();
+  if (ms > _maxWaitTimeMs) _maxWaitTimeMs = ms;
+}
+
+export function resetPoolStats() {
+  _poolWaitTimes = [];
+  _maxWaitTimeMs = 0;
+}
+
+export function getPoolStats() {
+  const total = pool.totalCount || 0;
+  const idle = pool.idleCount || 0;
+  const waiting = pool.waitingCount || 0;
+  const active = Math.max(0, total - idle);
+  const max = pool.options?.max || (process.env.DATABASE_POOL_MAX ? parseInt(process.env.DATABASE_POOL_MAX, 10) : 10);
+  const saturation = max > 0 ? Number((active / max).toFixed(4)) : 0;
+  const avgWaitTimeMs = _poolWaitTimes.length > 0
+    ? Math.round(_poolWaitTimes.reduce((a, b) => a + b, 0) / _poolWaitTimes.length)
+    : 0;
+
+  return {
+    total,
+    idle,
+    active,
+    waiting,
+    max,
+    saturation,
+    avgWaitTimeMs,
+    maxWaitTimeMs: _maxWaitTimeMs,
+  };
+}
+
+const _rawConnect = pool.connect.bind(pool);
+pool.connect = function(cb) {
+  const start = Date.now();
+  if (typeof cb === "function") {
+    return _rawConnect((err, client, release) => {
+      recordPoolAcquire(Date.now() - start);
+      cb(err, client, release);
+    });
+  }
+  return _rawConnect().then(
+    (client) => {
+      recordPoolAcquire(Date.now() - start);
+      return client;
+    },
+    (err) => {
+      recordPoolAcquire(Date.now() - start);
+      throw err;
+    },
+  );
+};
 
 // Wrap every query in an OTel span (issue #755) so a request's trace shows
 // DB timing alongside its RPC and cache hops. Only instruments the
@@ -134,6 +148,68 @@ export const db = {
   queryRead,
   getReplicaState,
   getLastWriteLsn,
+  getPoolStats,
+  resetPoolStats,
+  async recordIncidentEvent(event) {
+    const { event_type, severity = "info", source = "indexer", summary, details = {} } = event;
+    const { rows } = await pool.query(
+      `INSERT INTO operator_incident_events (event_type, severity, source, summary, details, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       RETURNING id, event_type, severity, source, summary, details, created_at`,
+      [event_type, severity, source, summary, JSON.stringify(details)],
+    );
+    return rows[0];
+  },
+  async getIncidentTimeline({ event_type, severity, source, from, to, limit = 50, offset = 0 } = {}) {
+    const conditions = [];
+    const params = [];
+    if (event_type) {
+      params.push(event_type);
+      conditions.push(`event_type = $${params.length}`);
+    }
+    if (severity) {
+      params.push(severity);
+      conditions.push(`severity = $${params.length}`);
+    }
+    if (source) {
+      params.push(source);
+      conditions.push(`source = $${params.length}`);
+    }
+    if (from) {
+      params.push(new Date(from).toISOString());
+      conditions.push(`created_at >= $${params.length}`);
+    }
+    if (to) {
+      params.push(new Date(to).toISOString());
+      conditions.push(`created_at <= $${params.length}`);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const countRes = await queryRead(`SELECT COUNT(*)::INT as total FROM operator_incident_events ${where}`, [...params]);
+    const total = countRes.rows[0]?.total ?? 0;
+
+    const numLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+    const numOffset = Math.max(Number(offset) || 0, 0);
+
+    params.push(numLimit);
+    const lIdx = params.length;
+    params.push(numOffset);
+    const oIdx = params.length;
+
+    const { rows } = await queryRead(
+      `SELECT id, event_type, severity, source, summary, details, created_at
+       FROM operator_incident_events
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${lIdx} OFFSET $${oIdx}`,
+      params,
+    );
+    return {
+      data: rows,
+      total,
+      limit: numLimit,
+      offset: numOffset,
+    };
+  },
   async getReplayRows(from, to) {
     const { rows } = await queryRead("SELECT * FROM events WHERE ledger BETWEEN $1 AND $2 ORDER BY ledger, seq", [from, to]);
     return rows;
@@ -3032,6 +3108,56 @@ export const db = {
    * @param {string} contractId
    * @returns {Promise<{ abi_version: number, functions: object[], registered_by: string, min_ledger: number, created_at: string }[]>}
    */
+  // Issue #1059 — apply a metadata correction and record it in one statement.
+  // `field` must already be validated against CORRECTABLE_FIELDS. Returns the
+  // correction row, or null when the contract does not exist.
+  async correctContractMetadata(contractId, { field, new_value, reason, actor }) {
+    // `field` is interpolated into SQL, so it is checked against the allowlist here too.
+    if (field !== "name" && field !== "description") throw new Error(`Field not correctable: ${field}`);
+    const { rows } = await pool.query(
+      `WITH cur AS (
+         SELECT id, ${field} AS old_value FROM contracts WHERE id = $1
+       ),
+       upd AS (
+         UPDATE contracts SET ${field} = $2 WHERE id = $1 AND EXISTS (SELECT 1 FROM cur) RETURNING id
+       )
+       INSERT INTO contract_metadata_corrections (contract_id, field, old_value, new_value, reason, actor)
+       SELECT cur.id, $3, cur.old_value, $2, $4, $5
+       FROM cur WHERE EXISTS (SELECT 1 FROM upd)
+       RETURNING id, contract_id, field, old_value, new_value, reason, actor, created_at`,
+      [contractId, new_value, field, reason, actor],
+    );
+    return rows[0] ?? null;
+  },
+
+  async getContractCorrections(contractId, limit = 100) {
+    const { rows } = await queryRead(
+      `SELECT id, contract_id, field, old_value, new_value, reason, actor, created_at
+       FROM contract_metadata_corrections
+       WHERE contract_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2`,
+      [contractId, limit],
+    );
+    return rows;
+  },
+
+  // Issue #1058 — per-function counts of events in [fromLedger, toLedger] and how
+  // many of them were decoded against an ABI/spec (see src/decodeCoverage.js).
+  async getDecodeCoverageByFunction(contractId, fromLedger, toLedger, decodedStatuses) {
+    const { rows } = await queryRead(
+      `SELECT function,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE decode_status = ANY($4::text[]))::int AS decoded
+       FROM events
+       WHERE contract_id = $1 AND ledger BETWEEN $2 AND $3
+       GROUP BY function
+       ORDER BY total DESC, function ASC`,
+      [contractId, fromLedger, toLedger, decodedStatuses],
+    );
+    return rows;
+  },
+
   async getContractAbiHistory(contractId) {
     const { rows } = await pool.query(
       `SELECT abi_version, functions, registered_by, min_ledger, created_at
@@ -3123,6 +3249,49 @@ export const db = {
   async getAsset(code, issuer) {
     const { rows } = await pool.query("SELECT * FROM assets WHERE code = $1 AND issuer = $2", [code, issuer]);
     return rows[0] ?? null;
+  },
+
+  /** Mint and burn events for a SAC contract, oldest first (#1067). */
+  async getSupplyEvents(contractId) {
+    const { rows } = await pool.query(
+      `SELECT seq, ledger, function, tx_hash, (raw_data::jsonb->>'amount') AS amount
+       FROM events
+       WHERE contract_id = $1 AND function IN ('mint', 'burn')
+       ORDER BY ledger ASC, seq ASC`,
+      [contractId],
+    );
+    return rows;
+  },
+
+  /** Latest market-data observation for an asset, or null (#1068). */
+  async getLatestAssetPrice(code, issuer) {
+    const { rows } = await pool.query(
+      `SELECT price, observed_at, source FROM asset_price_observations
+       WHERE code = $1 AND issuer = $2
+       ORDER BY observed_at DESC LIMIT 1`,
+      [code, issuer],
+    );
+    return rows[0] ?? null;
+  },
+
+  /** Token transfers for a contract within [from, to), for counterparty summaries (#1069). */
+  async getTransfersInRange(contractId, from, to) {
+    const { rows } = await pool.query(
+      `SELECT raw_data::jsonb->>'from' AS "from",
+              raw_data::jsonb->>'to'   AS "to",
+              raw_data::jsonb->>'amount' AS amount
+       FROM events
+       WHERE contract_id = $1 AND function = 'transfer'
+         AND created_at >= $2 AND created_at < $3`,
+      [contractId, from, to],
+    );
+    return rows;
+  },
+
+  /** All issuers that have published an asset with this code (#1066). */
+  async getAssetsByCode(code) {
+    const { rows } = await pool.query("SELECT code, issuer FROM assets WHERE code = $1 ORDER BY issuer", [code]);
+    return rows;
   },
 
   async upsertAsset({ code, issuer, name, domain, logo_url, decimals }) {
