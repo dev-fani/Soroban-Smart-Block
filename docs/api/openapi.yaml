@@ -3386,6 +3386,219 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/abi/lint:
+    post:
+      summary: Lint an ABI function list (Issue #1054)
+      description: |
+        Pure checks run before submission: Soroban symbol naming, duplicate
+        functions and parameters, parameter kinds, and size limits. Unknown
+        parameter kinds are returned as warnings, not errors.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [functions]
+              properties:
+                functions:
+                  type: array
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      params:
+                        type: array
+                        items:
+                          type: object
+                          required: [name, kind]
+                          properties:
+                            name:
+                              type: string
+                            kind:
+                              type: string
+      responses:
+        "200":
+          description: ABI is valid (warnings may still be present)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AbiLintResult"
+        "422":
+          description: ABI has one or more errors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AbiLintResult"
+
+  /api/abi/manifest:
+    post:
+      summary: Build a verified ABI import manifest (Issue #1055)
+      description: |
+        Binds lint-clean metadata to a contract ID, network and provenance. The
+        manifest carries the SHA-256 of the canonical metadata, not the metadata.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract_id, network, provenance, functions]
+              properties:
+                contract_id:
+                  type: string
+                  example: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                network:
+                  type: string
+                  enum: [mainnet, testnet, futurenet]
+                provenance:
+                  type: object
+                  required: [source]
+                  properties:
+                    source:
+                      type: string
+                      maxLength: 64
+                    reference:
+                      type: string
+                      maxLength: 500
+                name:
+                  type: string
+                description:
+                  type: string
+                functions:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        "200":
+          description: Manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AbiManifest"
+        "422":
+          description: Identity, provenance or lint validation failed
+
+  /api/abi/manifest/verify:
+    post:
+      summary: Verify metadata against a manifest (Issue #1055)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifest, metadata]
+              properties:
+                manifest:
+                  $ref: "#/components/schemas/AbiManifest"
+                metadata:
+                  type: object
+      responses:
+        "200":
+          description: Manifest matches metadata
+        "422":
+          description: Version, identity or content hash mismatch
+
+  /api/contracts/{id}/lineage:
+    get:
+      summary: Upgrade lineage (Issue #1056)
+      description: |
+        WASM versions seen through upgrade events, with activation and
+        supersession ledgers, alongside the ABI metadata versions in force.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Lineage
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upgrade_count:
+                    type: integer
+                  wasm_versions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        wasm_hash:
+                          type: string
+                        activated_ledger:
+                          type: integer
+                          nullable: true
+                        activated_tx_hash:
+                          type: string
+                          nullable: true
+                        superseded_ledger:
+                          type: integer
+                          nullable: true
+                        is_current:
+                          type: boolean
+                        metadata_abi_version:
+                          type: integer
+                          nullable: true
+                  metadata_versions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        abi_version:
+                          type: integer
+                        min_ledger:
+                          type: integer
+                          nullable: true
+                        created_at:
+                          type: string
+                          nullable: true
+
+  /api/abi/preview:
+    post:
+      summary: Preview sample XDR decoding under a proposed ABI (Issue #1057)
+      description: |
+        Lints the proposed functions, then decodes each sample's base64 ScVal
+        arguments against the declared parameter kinds. At most 20 samples.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [functions]
+              properties:
+                functions:
+                  type: array
+                  items:
+                    type: object
+                samples:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: object
+                    required: [fn, args]
+                    properties:
+                      fn:
+                        type: string
+                      args:
+                        type: array
+                        items:
+                          type: string
+                          description: Base64-encoded ScVal XDR
+      responses:
+        "200":
+          description: All samples decode and type-check
+        "422":
+          description: Lint failure, unknown function, argument mismatch or decode failure
+
   /api/verify:
     post:
       summary: Verify ABI without registering
@@ -5112,6 +5325,49 @@ components:
         Compatible with standard authenticator apps (30s step, 6 digits, SHA-1).
 
   schemas:
+    AbiFinding:
+      type: object
+      properties:
+        path:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+    AbiLintResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/AbiFinding"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/AbiFinding"
+    AbiManifest:
+      type: object
+      properties:
+        manifest_version:
+          type: integer
+          example: 1
+        contract_id:
+          type: string
+        network:
+          type: string
+          enum: [mainnet, testnet, futurenet]
+        provenance:
+          type: object
+          properties:
+            source:
+              type: string
+            reference:
+              type: string
+        content_hash:
+          type: string
+          description: Lowercase hex SHA-256 of the canonical metadata
     NullableNumber:
       type: number
       nullable: true

@@ -66,6 +66,10 @@ import {
 import { validatePreset, encodeShareToken, decodeShareToken } from "./walletFilterPresets.js";
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
+import { lintAbi } from "./abiLint.js";
+import { buildManifest, verifyManifest } from "./abiManifest.js";
+import { buildUpgradeLineage } from "./upgradeLineage.js";
+import { previewRegistration } from "./registrationPreview.js";
 import { getMetrics } from "./rpcMetrics.js";
 import { getRpcNodeStatus, getProviderStats, multiNodeRpc } from "./rpcMultiNode.js";
 import { cacheHitTotal, cacheMissTotal, apiRequestDuration, httpRequestsInFlight } from "./metrics.js";
@@ -2433,6 +2437,59 @@ export function createApi({ logDestination, dbOverride } = {}) {
 
       const verification = await verifyAbi(contractId, functions);
       res.json(verification);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/abi/lint — pure ABI metadata checks (issue #1054). No storage or RPC access.
+  app.post("/api/abi/lint", writeLimiter, (req, res) => {
+    const result = lintAbi(req.body?.functions);
+    res.status(result.valid ? 200 : 422).json(result);
+  });
+
+  // POST /api/abi/manifest — build a verified import manifest for a lint-clean ABI (issue #1055)
+  app.post("/api/abi/manifest", writeLimiter, (req, res) => {
+    const { contract_id, network, provenance, name, description, functions } = req.body ?? {};
+    const result = buildManifest({
+      contractId: contract_id,
+      network,
+      provenance,
+      metadata: { name, description, functions },
+    });
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.json(result.manifest);
+  });
+
+  // POST /api/abi/manifest/verify — check metadata against a manifest's content hash (issue #1055)
+  app.post("/api/abi/manifest/verify", writeLimiter, (req, res) => {
+    const { manifest, metadata = {} } = req.body ?? {};
+    const result = verifyManifest(manifest, metadata);
+    res.status(result.valid ? 200 : 422).json(result);
+  });
+
+  // POST /api/abi/preview — decode sample XDR arguments under a proposed ABI before publishing (issue #1057)
+  app.post("/api/abi/preview", writeLimiter, (req, res) => {
+    const { functions, samples } = req.body ?? {};
+    const result = previewRegistration({ functions, samples });
+    res.status(result.valid ? 200 : 422).json(result);
+  });
+
+  // GET /api/contracts/:id/lineage — WASM versions and upgrade ledgers alongside
+  // metadata versions (issue #1056)
+  app.get("/api/contracts/:id/lineage", async (req, res) => {
+    try {
+      const [versions, upgrades] = await Promise.all([
+        db.query(
+          `SELECT abi_version, min_ledger, created_at
+           FROM contract_versions
+           WHERE contract_id = $1
+           ORDER BY abi_version ASC`,
+          [req.params.id],
+        ).then((r) => r.rows),
+        db.getUpgradeHistory(req.params.id),
+      ]);
+      res.json(buildUpgradeLineage(versions, upgrades));
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
