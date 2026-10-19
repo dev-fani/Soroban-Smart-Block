@@ -28,7 +28,7 @@ export default [
   // ── SSRF (#928): all outbound HTTP must go through src/safeHttp.js ──────────
   {
     files: ["src/**/*.js"],
-    ignores: ["src/safeHttp.js", "src/admin-cli.js", "src/optional/**"],
+    ignores: ["src/safeHttp.js", "src/optional/**"],
     rules: {
       "no-restricted-globals": [
         "error",
@@ -67,13 +67,9 @@ export default [
     },
   },
 
-  // ── CommonJS: legacy pg-migrate migrations and two optional CJS helpers ─────
+  // ── CommonJS: legacy pg-migrate migrations ──────────────────────────────────
   {
-    files: [
-      "migrations/**/*.js",
-      "src/optional/eventInserter.js",
-      "src/optional/rpcPool.js",
-    ],
+    files: ["migrations/**/*.js"],
     languageOptions: {
       sourceType: "commonjs",
       globals: {
