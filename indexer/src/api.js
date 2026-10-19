@@ -1,4 +1,8 @@
 import { logger } from "./logger.js";
+import { resolveAssetIdentity } from "./assetIdentity.js";
+import { buildSupplyHistory } from "./assetSupplyHistory.js";
+import { classifyPriceObservation } from "./marketPrice.js";
+import { summarizeCounterparties } from "./transferCounterparties.js";
 import express from "express";
 import http from "http";
 import path from "path";
@@ -141,6 +145,9 @@ import {
   verifyResultUrl,
 } from "./jobs/queryJobs.js";
 import { loadResponseValidator, responseValidationMiddleware } from "./openapiValidator.js";
+import { buildDecodeCoverage, DECODED_STATUSES, parseLedgerRange } from "./decodeCoverage.js";
+import { validateCorrection } from "./metadataCorrections.js";
+import { computeConcentration } from "./holderConcentration.js";
 import { loadSigningKeys, publishedKeys, signEnvelope, wantsSignedResponse, SIGNED_MEDIA_TYPE } from "./signing.js";
 import addFormats from "ajv-formats";
 import {
@@ -2233,6 +2240,49 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/contracts/:id/decode-coverage?from_ledger=&to_ledger= — share of events per
+  // function that decoded against an ABI/spec in the ledger range (Issue #1058).
+  app.get("/api/contracts/:id/decode-coverage", async (req, res) => {
+    const range = parseLedgerRange(req.query);
+    if (range.error) return res.status(400).json({ error: range.error });
+    try {
+      const rows = await db.getDecodeCoverageByFunction(req.params.id, range.from, range.to, DECODED_STATUSES);
+      res.json({
+        contract_id: req.params.id,
+        from_ledger: range.from,
+        to_ledger: range.to,
+        ...buildDecodeCoverage(rows),
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/contracts/:id/metadata-corrections — correct a live name/description and
+  // record who changed it and why. Prior contract_versions rows are not modified (Issue #1059).
+  app.post("/api/contracts/:id/metadata-corrections", writeLimiter, requireApiKey, async (req, res) => {
+    const input = validateCorrection(req.body);
+    if (input.error) return res.status(400).json({ error: input.error });
+    try {
+      const actor = req.rateContext?.keyId || "api-key";
+      const correction = await db.correctContractMetadata(req.params.id, { ...input, actor });
+      if (!correction) return res.status(404).json({ error: "Contract not found" });
+      res.status(201).json(correction);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/contracts/:id/metadata-corrections — public, newest first (Issue #1059).
+  app.get("/api/contracts/:id/metadata-corrections", async (req, res) => {
+    try {
+      const corrections = await db.getContractCorrections(req.params.id);
+      res.json({ contract_id: req.params.id, corrections });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // GET /api/contracts/:id/spec-full — fetch full on-chain spec including custom types
   app.get("/api/contracts/:id/spec-full", async (req, res) => {
     try {
@@ -2739,6 +2789,86 @@ export function createApi({ logDestination, dbOverride } = {}) {
     }
   });
 
+  // GET /api/assets/:issuer/:code/supply-history?contract_id= — mint/burn
+  // supply series for the asset's SAC contract, with source events and coverage (#1067).
+  app.get("/api/assets/:issuer/:code/supply-history", async (req, res) => {
+    try {
+      const { issuer, code } = req.params;
+      const contractId = req.query.contract_id;
+      if (typeof contractId !== "string" || !/^C[A-Z2-7]{55}$/.test(contractId)) {
+        return res.status(422).json({ error: "Invalid contract_id" });
+      }
+      const asset = await db.getAsset(code, issuer);
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+      const events = await db.getSupplyEvents(contractId);
+      const history = buildSupplyHistory(events);
+      res.json({ code, issuer, contract_id: contractId, ...history, empty: history.points.length === 0 });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/assets/:issuer/:code/price — latest price with explicit
+  // missing / incomplete / stale / fresh status; never a zero fallback (#1068).
+  app.get("/api/assets/:issuer/:code/price", async (req, res) => {
+    try {
+      const { issuer, code } = req.params;
+      const observation = await db.getLatestAssetPrice(code, issuer);
+      res.json({ code, issuer, ...classifyPriceObservation(observation) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/assets/:issuer/:code/identity — identity evidence for a classic
+  // asset. Same-code assets from other issuers are listed but never merged (#1066).
+  app.get("/api/assets/:issuer/:code/identity", async (req, res) => {
+    try {
+      const { issuer, code } = req.params;
+      const asset = await db.getAsset(code, issuer);
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+      const others = await db.getAssetsByCode(code);
+      const candidates = [
+        { code, issuer, source: "assets_registry" },
+        ...others.map((row) => ({ code: row.code, issuer: row.issuer, source: "assets_registry" })),
+      ];
+      const { identities, skipped } = resolveAssetIdentity(candidates);
+      const identity = identities.find((i) => i.code === code && i.issuer === issuer);
+      res.json({ code, issuer, identity: identity ?? null, skipped });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:id/counterparties?from=&to=&limit= — largest senders and
+  // recipients over a time range, with public account links (#1069).
+  app.get("/api/tokens/:id/counterparties", async (req, res) => {
+    try {
+      const contractId = req.params.id;
+      const from = new Date(req.query.from ?? "");
+      const to = new Date(req.query.to ?? "");
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+        return res.status(422).json({ error: "from and to must be valid dates with from < to" });
+      }
+      let limit = 10;
+      if (req.query.limit !== undefined) {
+        limit = Number(req.query.limit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+          return res.status(422).json({ error: "Invalid limit" });
+        }
+      }
+      const rows = await db.getTransfersInRange(contractId, from.toISOString(), to.toISOString());
+      res.json({
+        contract_id: contractId,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        ...summarizeCounterparties(rows, { limit }),
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // GET /api/tokens/:id/metadata — SEP-41 token metadata (#915)
   // Returns name, symbol, decimals fetched via on-chain simulation.
   app.get("/api/tokens/:id/metadata", async (req, res) => {
@@ -2775,6 +2905,28 @@ export function createApi({ logDestination, dbOverride } = {}) {
         decimals,
         total_holders: holders.length,
         holders,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/tokens/:id/concentration?top=N — top-N share and HHI over the current holder
+  // snapshot (Issue #1061). token_holders keeps no history, so coverage is always "current".
+  app.get("/api/tokens/:id/concentration", async (req, res) => {
+    const top = req.query.top === undefined ? 10 : Number(req.query.top);
+    if (!Number.isInteger(top) || top < 1 || top > 100) {
+      return res.status(400).json({ error: "top must be an integer between 1 and 100" });
+    }
+    try {
+      const rows = await db.getTokenHolders(req.params.id);
+      res.json({
+        contract_id: req.params.id,
+        ...computeConcentration(
+          rows.map((r) => r.balance_raw),
+          top,
+        ),
+        coverage: { source: "token_holders", snapshot: "current", historical: false },
       });
     } catch (e) {
       res.status(500).json({ error: e.message });
