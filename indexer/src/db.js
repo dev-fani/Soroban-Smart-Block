@@ -2948,6 +2948,56 @@ export const db = {
    * @param {string} contractId
    * @returns {Promise<{ abi_version: number, functions: object[], registered_by: string, min_ledger: number, created_at: string }[]>}
    */
+  // Issue #1059 — apply a metadata correction and record it in one statement.
+  // `field` must already be validated against CORRECTABLE_FIELDS. Returns the
+  // correction row, or null when the contract does not exist.
+  async correctContractMetadata(contractId, { field, new_value, reason, actor }) {
+    // `field` is interpolated into SQL, so it is checked against the allowlist here too.
+    if (field !== "name" && field !== "description") throw new Error(`Field not correctable: ${field}`);
+    const { rows } = await pool.query(
+      `WITH cur AS (
+         SELECT id, ${field} AS old_value FROM contracts WHERE id = $1
+       ),
+       upd AS (
+         UPDATE contracts SET ${field} = $2 WHERE id = $1 AND EXISTS (SELECT 1 FROM cur) RETURNING id
+       )
+       INSERT INTO contract_metadata_corrections (contract_id, field, old_value, new_value, reason, actor)
+       SELECT cur.id, $3, cur.old_value, $2, $4, $5
+       FROM cur WHERE EXISTS (SELECT 1 FROM upd)
+       RETURNING id, contract_id, field, old_value, new_value, reason, actor, created_at`,
+      [contractId, new_value, field, reason, actor],
+    );
+    return rows[0] ?? null;
+  },
+
+  async getContractCorrections(contractId, limit = 100) {
+    const { rows } = await queryRead(
+      `SELECT id, contract_id, field, old_value, new_value, reason, actor, created_at
+       FROM contract_metadata_corrections
+       WHERE contract_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2`,
+      [contractId, limit],
+    );
+    return rows;
+  },
+
+  // Issue #1058 — per-function counts of events in [fromLedger, toLedger] and how
+  // many of them were decoded against an ABI/spec (see src/decodeCoverage.js).
+  async getDecodeCoverageByFunction(contractId, fromLedger, toLedger, decodedStatuses) {
+    const { rows } = await queryRead(
+      `SELECT function,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE decode_status = ANY($4::text[]))::int AS decoded
+       FROM events
+       WHERE contract_id = $1 AND ledger BETWEEN $2 AND $3
+       GROUP BY function
+       ORDER BY total DESC, function ASC`,
+      [contractId, fromLedger, toLedger, decodedStatuses],
+    );
+    return rows;
+  },
+
   async getContractAbiHistory(contractId) {
     const { rows } = await pool.query(
       `SELECT abi_version, functions, registered_by, min_ledger, created_at
