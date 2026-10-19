@@ -1186,6 +1186,283 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/wallet/compare:
+    get:
+      summary: Compare activity between two public accounts
+      description: >-
+        Summarises each account's indexed events over an optional date interval
+        and lists the contracts both accounts touched. `fields_used` discloses
+        the event columns the figures were derived from. Empty accounts return
+        zeroed summaries.
+      parameters:
+        - name: a
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: b
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Side-by-side activity summary
+          content:
+            application/json:
+              example:
+                interval: { from: "2026-01-01", to: "2026-01-31" }
+                accounts:
+                  - address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    event_count: 2
+                    contract_count: 1
+                    contract_ids: ["CABC"]
+                    function_counts: { transfer: 2 }
+                    first_ledger: 10
+                    last_ledger: 20
+                  - address: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    event_count: 0
+                    contract_count: 0
+                    contract_ids: []
+                    function_counts: {}
+                    first_ledger: null
+                    last_ledger: null
+                shared_contract_ids: []
+                fields_used: [contract_id, function, ledger, created_at]
+        "400":
+          description: Malformed address, identical addresses, or invalid interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/{address}/counterparties:
+    get:
+      summary: Most-interacted contracts and counterparties for a wallet
+      description: >-
+        Ranks the contracts and counterparty addresses (G... or C...) that a
+        public account's events reference, by event count. Each entry includes
+        tx_hashes and event_seqs (capped at 10) to drill down to source
+        transactions and events. Counterparties come from a textual scan of
+        event topics and data, so they can include referenced-only addresses.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^G[A-Z2-7]{55}$"
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        "200":
+          description: Ranked contracts and counterparties
+          content:
+            application/json:
+              example:
+                address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                interval: { from: null, to: null }
+                contracts:
+                  - contract_id: "CABC"
+                    count: 2
+                    tx_hashes: ["hashA", "hashB"]
+                    event_seqs: [7, 9]
+                counterparties:
+                  - address: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    count: 1
+                    tx_hashes: ["hashA"]
+                    event_seqs: [7]
+        "400":
+          description: Malformed address, invalid interval, or invalid limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/workspace:
+    post:
+      summary: Summarise a private multi-account review selection
+      description: >-
+        Returns activity and counterparty summaries for 2-10 distinct public
+        accounts in one response. The server stores nothing: the selection is
+        kept in the browser, and the response is sent with Cache-Control:
+        no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [addresses]
+              properties:
+                addresses:
+                  type: array
+                  minItems: 2
+                  maxItems: 10
+                  items:
+                    type: string
+                    pattern: "^G[A-Z2-7]{55}$"
+                from:
+                  type: string
+                  format: date
+                to:
+                  type: string
+                  format: date
+      responses:
+        "200":
+          description: One summary per requested account, in request order
+          content:
+            application/json:
+              example:
+                interval: { from: null, to: null }
+                accounts:
+                  - address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    activity:
+                      event_count: 1
+                      contract_count: 1
+                      contract_ids: ["CABC"]
+                      function_counts: { transfer: 1 }
+                      first_ledger: 10
+                      last_ledger: 10
+                    contracts:
+                      - contract_id: "CABC"
+                        count: 1
+                        tx_hashes: ["hashA"]
+                        event_seqs: [7]
+                    counterparties: []
+                fields_used: [contract_id, function, ledger, created_at]
+        "400":
+          description: Non-array body, 1 or more than 10 accounts, invalid or duplicate addresses, or invalid interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/filter-presets/validate:
+    post:
+      summary: Validate an account activity filter preset
+      description: >-
+        Checks a preset's name, fn categories, and date interval, and returns
+        the normalised form. Stores nothing. Presets are saved in the browser.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 60 }
+                fn: { type: string, description: "Comma-separated categories, up to 10" }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+      responses:
+        "200":
+          description: Normalised preset
+          content:
+            application/json:
+              example:
+                preset: { name: "Monthly transfers", fn: "transfer", from: "2026-01-01", to: "2026-01-31" }
+        "422":
+          description: Every validation problem, in `errors`
+          content:
+            application/json:
+              example:
+                errors: ["name is required"]
+
+  /api/wallet/filter-presets/share:
+    post:
+      summary: Encode a filter preset as a share token
+      description: >-
+        Returns a self-contained, versioned, base64url token for a validated
+        preset. The token carries the preset itself; nothing is stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 60 }
+                fn: { type: string }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+      responses:
+        "200":
+          description: Share token
+          content:
+            application/json:
+              example:
+                token: "eyJ2IjoxLCJuYW1lIjoiVHJhbnNmZXJzIn0"
+        "422":
+          description: Invalid preset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/wallet/filter-presets/open:
+    post:
+      summary: Decode a filter preset share token
+      description: >-
+        Decodes a share token and re-validates the preset it contains, so a
+        hand-made token cannot skip the checks applied on save.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, maxLength: 2048 }
+      responses:
+        "200":
+          description: Decoded and validated preset
+          content:
+            application/json:
+              example:
+                preset: { name: "Transfers", fn: "transfer", from: null, to: null }
+        "422":
+          description: Malformed, unsupported, or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/wallet/{address}:
     get:
       summary: Get events involving a wallet address

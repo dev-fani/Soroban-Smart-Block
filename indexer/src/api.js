@@ -54,6 +54,16 @@ export function handleCursorError(e, res) {
 import { analyzeSourceDependencies } from "./dependencyScanner.js";
 import { fetchTokenMetadata } from "./sep41Metadata.js";
 import { fetchWalletBalances, fetchAccountMeta, AccountNotFoundError } from "./horizonBalances.js";
+import {
+  isPublicAccountAddress,
+  parseInterval,
+  parseSummaryLimit,
+  compareAccountActivity,
+  summarizeCounterparties,
+  parseWorkspaceAddresses,
+  buildWorkspaceSummary,
+} from "./walletActivity.js";
+import { validatePreset, encodeShareToken, decodeShareToken } from "./walletFilterPresets.js";
 import { attachWebSocketServer, attachEventStreamRoutes, getTransactionStatus, onTransactionStatus, offTransactionStatus } from "./wsEvents.js";
 import { verifyAbi } from "./verify_abi.js";
 import { getMetrics } from "./rpcMetrics.js";
@@ -2670,6 +2680,114 @@ export function createApi({ logDestination, dbOverride } = {}) {
     } catch (e) {
       res.status(500).json({ success: false, error: e.message });
     }
+  });
+
+  // GET /api/wallet/compare?a=&b=&from=&to= — side-by-side activity summary
+  // for two public accounts over the same optional date interval (#1046).
+  // Registered before /api/wallet/:address so "compare" is not read as an
+  // address. Returns 400 for malformed or identical addresses or a bad
+  // interval; empty accounts yield zeroed summaries, not an error.
+  app.get("/api/wallet/compare", async (req, res) => {
+    const { a, b } = req.query;
+    if (!isPublicAccountAddress(a) || !isPublicAccountAddress(b)) {
+      return res.status(400).json({ error: "a and b must be valid public account addresses (G...)" });
+    }
+    if (a === b) {
+      return res.status(400).json({ error: "a and b must be different addresses" });
+    }
+    let interval;
+    try {
+      interval = parseInterval(req.query);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+    try {
+      const [left, right] = await Promise.all([
+        db.getWalletEvents(a, interval),
+        db.getWalletEvents(b, interval),
+      ]);
+      res.json({
+        interval,
+        ...compareAccountActivity({ address: a, events: left }, { address: b, events: right }),
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/wallet/:address/counterparties?from=&to=&limit= — most-interacted
+  // contracts and counterparty addresses for a public account, each with
+  // tx_hashes and event_seqs for drill-down (#1047). limit is 1-50 (default
+  // 10). An account with no events returns empty lists, not an error.
+  app.get("/api/wallet/:address/counterparties", async (req, res) => {
+    const { address } = req.params;
+    if (!isPublicAccountAddress(address)) {
+      return res.status(400).json({ error: "address must be a valid public account address (G...)" });
+    }
+    let interval;
+    let limit;
+    try {
+      interval = parseInterval(req.query);
+      limit = parseSummaryLimit(req.query.limit);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+    try {
+      const events = await db.getWalletEvents(address, interval);
+      res.json({ address, interval, ...summarizeCounterparties(events, address, { limit }) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/wallet/workspace  body: { addresses: [G..., ...], from?, to? } —
+  // summaries for 2-10 distinct public accounts in one response (#1048). The
+  // server keeps no record of the list: selection lives in the browser, and the
+  // response is marked no-store. Invalid or duplicate addresses return 400.
+  app.post("/api/wallet/workspace", async (req, res) => {
+    let addresses;
+    let interval;
+    try {
+      addresses = parseWorkspaceAddresses(req.body?.addresses);
+      interval = parseInterval(req.body ?? {});
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+    res.set("Cache-Control", "no-store");
+    try {
+      const entries = await Promise.all(
+        addresses.map(async (address) => ({
+          address,
+          events: await db.getWalletEvents(address, interval),
+        })),
+      );
+      res.json({ interval, ...buildWorkspaceSummary(entries) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Account activity filter presets (#1049). Presets are saved, named, and
+  // edited in the browser; these routes only validate one, or turn one into a
+  // share token and back. The server stores nothing. Invalid presets return
+  // 422 with every problem listed in `errors`.
+  app.post("/api/wallet/filter-presets/validate", (req, res) => {
+    const result = validatePreset(req.body);
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.json({ preset: result.preset });
+  });
+
+  app.post("/api/wallet/filter-presets/share", (req, res) => {
+    const result = validatePreset(req.body);
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.set("Cache-Control", "no-store");
+    res.json({ token: encodeShareToken(result.preset) });
+  });
+
+  app.post("/api/wallet/filter-presets/open", (req, res) => {
+    const result = decodeShareToken(req.body?.token);
+    if (!result.ok) return res.status(422).json({ errors: result.errors });
+    res.json({ preset: result.preset });
   });
 
   // GET /api/wallet/:address — events involving a Stellar/Soroban wallet.
